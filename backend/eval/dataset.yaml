@@ -1,0 +1,62 @@
+# Representative research questions for the evaluation harness (ARCHITECTURE.md §11).
+# Each case is run through the graph; `followups` (if present) are sent afterward in the
+# same session via the checkpointer, exactly like the API's /ask endpoint.
+
+- id: single_aapl_direct
+  question: "Analyze AAPL"
+  followups: []
+
+- id: single_nvda_natural_language
+  question: "What is the financial health of NVIDIA?"
+  followups: []
+
+- id: single_thin_coverage_company
+  # A real but far less-followed ticker than the mega-caps above — exercises the "few or
+  # no news results" path (web_search.py's text-search fallback / empty-results handling)
+  # under realistic conditions rather than a contrived one.
+  question: "Analyze UNFI"
+  followups: []
+
+- id: comparison_two_stocks
+  question: "Compare NVIDIA and AMD"
+  followups:
+    - question: "Which of the two has the higher profit margin?"
+      expected_path: answer
+    - question: "Now also add Intel to this comparison"
+      expected_path: add_ticker
+
+- id: comparison_three_stocks
+  question: "Compare Apple, Microsoft, and Google"
+  followups: []
+
+- id: portfolio_three_stocks
+  question: "Analyze my portfolio of NVIDIA, Apple and Microsoft"
+  followups: []
+
+- id: invalid_ticker_only
+  question: "Analyze ZZZINVALIDTICKERXYZ"
+  followups: []
+
+- id: comparison_with_one_invalid_ticker
+  question: "Compare Apple and ZZZINVALIDTICKERXYZ"
+  followups: []
+
+- id: max_tickers_cap
+  question: "Compare Apple, Microsoft, Google, Amazon, NVIDIA, and Tesla"
+  followups: []
+
+- id: followup_refresh_path
+  question: "Analyze AAPL"
+  followups:
+    - question: "Any fresh news on Apple today?"
+      expected_path: refresh
+
+- id: followup_answer_path
+  question: "Analyze AAPL"
+  followups:
+    - question: "What is the trailing P/E ratio?"
+      expected_path: answer
+
+- id: portfolio_natural_language
+  question: "I hold Microsoft, NVIDIA, and Amazon stock — how is my portfolio doing?"
+  followups: []
