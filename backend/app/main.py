@@ -6,23 +6,30 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.research_routes import router as research_router
 from app.config import settings
+from app.graph.build_graph import build_research_graph
 from app.logging_config import get_logger, log_event
+from app.memory.checkpointer import get_checkpointer
+from app.streaming.session_bus import init_db
 
 logger = get_logger("app.main")
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    log_event(
-        logger,
-        "startup",
-        environment=settings.environment,
-        groq_model=settings.groq_model,
-        max_tickers=settings.max_tickers,
-    )
-    yield
-    log_event(logger, "shutdown")
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    await init_db()
+    async with get_checkpointer() as checkpointer:
+        app.state.graph = build_research_graph(checkpointer=checkpointer)
+        log_event(
+            logger,
+            "startup",
+            environment=settings.environment,
+            groq_model=settings.groq_model,
+            max_tickers=settings.max_tickers,
+        )
+        yield
+        log_event(logger, "shutdown")
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -34,6 +41,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(research_router)
 
 
 @app.get("/health")
