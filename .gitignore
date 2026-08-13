@@ -1,0 +1,33 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Env / secrets
+.env
+backend/.env
+
+# Logs
+logs/*.log*
+!logs/.gitkeep
+
+# Eval outputs
+backend/eval/results/*.json
+
+# Runtime data (SQLite session/event store)
+backend/data/*.db
+backend/data/*.db-*
+!backend/data/.gitkeep
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# OS
+.DS_Store
+Thumbs.db
