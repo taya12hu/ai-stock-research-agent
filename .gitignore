@@ -28,6 +28,9 @@ frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
 
+# Local tracking doc 
+TODO.md
+
 # OS
 .DS_Store
 Thumbs.db
