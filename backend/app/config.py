@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     environment: str = "development"
 
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-120b"
 
     max_tickers: int = 5
     request_timeout_seconds: int = 20

@@ -320,7 +320,7 @@ rather than three reports stapled together.
   never committed (`.env.example` documents required keys).
 - **Frontend**: Vite + React + TypeScript, native `EventSource` (SSE, reconnect via
   `Last-Event-ID`), Tailwind for styling.
-- **Model routing**: one capable Groq-hosted model (e.g. `llama-3.3-70b-versatile`) for
+- **Model routing**: one capable Groq-hosted model (e.g. `openai/gpt-oss-120b`) for
   agent reasoning/tool-use, configurable via env.
 
 **Explicitly out of scope**: trading execution, user accounts/auth, multi-user scaling,
