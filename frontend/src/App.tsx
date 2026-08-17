@@ -1,63 +1,55 @@
-import { FinalReport } from "./components/FinalReport";
-import { FollowUpChat } from "./components/FollowUpChat";
+import { useEffect, useRef } from "react";
+
+import { ConversationFeed } from "./components/ConversationFeed";
+import { Hero } from "./components/Hero";
 import { QuestionInput } from "./components/QuestionInput";
-import { StatusBanner } from "./components/StatusBanner";
-import { TickerGroup } from "./components/TickerGroup";
+import { Sidebar } from "./components/Sidebar";
 import { useResearchStream } from "./hooks/useResearchStream";
 
-const QUERY_TYPE_LABELS: Record<string, string> = {
-  single: "Single-stock analysis",
-  portfolio: "Portfolio analysis",
-  comparison: "Comparison",
-};
-
 export default function App() {
-  const { state, start, ask } = useResearchStream();
+  const { sessionId, state, history, start, ask, newChat, loadChat, removeChat } = useResearchStream();
   const running = state.status === "running";
   const hasStarted = state.status !== "idle";
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [state]);
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-10">
-      <header className="mb-8">
-        <h1 className="text-2xl font-bold text-slate-900">AI Stock Research Assistant</h1>
-        <p className="mt-1 text-sm text-slate-500">
-          Fundamentals, technicals, and news/sentiment — researched independently and combined into
-          one cited report. Not investment advice.
-        </p>
-      </header>
+    <div className="flex h-screen overflow-hidden bg-transparent">
+      <Sidebar
+        history={history}
+        activeSessionId={sessionId}
+        onNewChat={newChat}
+        onSelectChat={loadChat}
+        onDeleteChat={removeChat}
+      />
 
-      {!hasStarted && (
-        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-          <QuestionInput onSubmit={start} disabled={running} />
-          <p className="mt-3 text-xs text-slate-400">
-            Try: "Analyze NVIDIA", "Compare NVIDIA and AMD", or "Analyze my portfolio of NVIDIA,
-            Apple and Microsoft"
-          </p>
-        </div>
-      )}
-
-      {hasStarted && (
-        <div className="space-y-6">
-          <StatusBanner notes={state.notes} error={state.error} />
-
-          {state.queryType && (
-            <p className="text-sm text-slate-500">
-              {QUERY_TYPE_LABELS[state.queryType] ?? state.queryType}
-              {state.tickers.length > 0 && ` — ${state.tickers.join(", ")}`}
-            </p>
-          )}
-
-          {state.tickers.map((ticker) => (
-            <TickerGroup key={ticker} ticker={ticker} agents={state.agents[ticker] ?? {}} />
-          ))}
-
-          {state.finalReport && <FinalReport markdown={state.finalReport} />}
-
-          {state.status !== "idle" && (
-            <FollowUpChat transcript={state.transcript} onAsk={ask} running={running} />
-          )}
-        </div>
-      )}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {hasStarted ? (
+          <>
+            <main className="flex-1 overflow-y-auto">
+              <ConversationFeed state={state} />
+              <div ref={bottomRef} />
+            </main>
+            <div className="shrink-0 border-t border-slate-800/80 bg-slate-950/90 px-6 py-4 backdrop-blur">
+              <div className="mx-auto max-w-6xl">
+                <QuestionInput
+                  onSubmit={ask}
+                  disabled={running}
+                  placeholder='Ask a follow-up, e.g. "Any fresh news today?"'
+                  variant="bar"
+                />
+              </div>
+            </div>
+          </>
+        ) : (
+          <main className="flex-1 overflow-y-auto">
+            <Hero onSubmit={start} disabled={running} />
+          </main>
+        )}
+      </div>
     </div>
   );
 }

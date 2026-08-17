@@ -7,10 +7,10 @@ const LABELS: Record<AgentName, string> = {
 };
 
 const STATUS_STYLES: Record<AgentStatus, string> = {
-  queued: "bg-slate-100 text-slate-500",
-  running: "bg-amber-100 text-amber-700",
-  ok: "bg-emerald-100 text-emerald-700",
-  failed: "bg-rose-100 text-rose-700",
+  queued: "bg-slate-800 text-slate-400",
+  running: "bg-amber-500/10 text-amber-400 ring-1 ring-inset ring-amber-500/30",
+  ok: "bg-emerald-500/10 text-emerald-400 ring-1 ring-inset ring-emerald-500/30",
+  failed: "bg-rose-500/10 text-rose-400 ring-1 ring-inset ring-rose-500/30",
 };
 
 const STATUS_LABELS: Record<AgentStatus, string> = {
@@ -24,11 +24,11 @@ export function AgentCard({ agent, state }: { agent: AgentName; state?: AgentSta
   const status = state?.status ?? "queued";
 
   return (
-    <div className="rounded-lg border border-slate-200 p-3">
+    <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-3">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-semibold text-slate-700">{LABELS[agent]}</span>
+        <span className="text-sm font-semibold text-slate-300">{LABELS[agent]}</span>
         <span
-          className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[status]} ${
+          className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${STATUS_STYLES[status]} ${
             status === "running" ? "animate-pulse" : ""
           }`}
         >
@@ -36,29 +36,45 @@ export function AgentCard({ agent, state }: { agent: AgentName; state?: AgentSta
         </span>
       </div>
 
-      {status === "failed" && state?.error && <p className="mt-2 text-xs text-rose-600">{state.error}</p>}
+      {status === "failed" && state?.error && <p className="mt-2 text-xs text-rose-400">{state.error}</p>}
 
       {status === "ok" && (
         <>
-          {state?.summary && <p className="mt-2 text-xs leading-relaxed text-slate-600">{state.summary}</p>}
+          {state?.summary && <p className="mt-2 text-xs leading-relaxed text-slate-400">{state.summary}</p>}
           {!!state?.findings?.length && (
-            <ul className="mt-2 space-y-1.5 border-t border-slate-100 pt-2">
-              {state.findings.map((f) => (
-                <li key={f.id} className="text-xs leading-relaxed text-slate-500">
-                  <span className="font-medium text-slate-700">{f.claim}</span> — {f.evidence}
-                  {f.source.url && (
-                    <a
-                      href={f.source.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="ml-1 text-indigo-600 hover:underline"
-                    >
-                      source
-                    </a>
-                  )}
-                </li>
-              ))}
-            </ul>
+            <div className="mt-2 overflow-hidden rounded-md border border-slate-800/80">
+              <table className="w-full border-collapse text-left text-[11px]">
+                <thead>
+                  <tr className="bg-slate-800/60 text-slate-400">
+                    <th className="px-2 py-1.5 font-medium">Claim</th>
+                    <th className="px-2 py-1.5 font-medium">Evidence</th>
+                    <th className="w-14 px-2 py-1.5 font-medium">Src</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.findings.map((f) => (
+                    <tr key={f.id} className="border-t border-slate-800/80 align-top">
+                      <td className="px-2 py-1.5 font-medium text-slate-300">{f.claim}</td>
+                      <td className="px-2 py-1.5 text-slate-500">{f.evidence}</td>
+                      <td className="px-2 py-1.5">
+                        {f.source.url ? (
+                          <a
+                            href={f.source.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-indigo-400 hover:underline"
+                          >
+                            link
+                          </a>
+                        ) : (
+                          <span className="text-slate-600">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </>
       )}

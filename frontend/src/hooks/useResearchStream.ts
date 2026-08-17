@@ -1,6 +1,7 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { askFollowUp, startResearch, streamUrl } from "../api/client";
+import { deleteChat, listChats, loadChatState, saveChatState, titleFromQuestion, type ChatSummary } from "../lib/history";
 import { EVENT_TYPES, type AgentName, type ResearchEvent, type ResearchStreamState, type TickerAgents, type TranscriptEntry } from "../types";
 
 const initialState: ResearchStreamState = {
@@ -82,13 +83,23 @@ function applyEvent(prev: ResearchStreamState, event: ResearchEvent): ResearchSt
 export function useResearchStream() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [state, setState] = useState<ResearchStreamState>(initialState);
+  const [history, setHistory] = useState<ChatSummary[]>(() => listChats());
   const eventSourceRef = useRef<EventSource | null>(null);
   const nextTranscriptId = useRef(0);
+  const titleRef = useRef<string>("");
 
   const closeStream = useCallback(() => {
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
   }, []);
+
+  // Persist a snapshot after every state change so the sidebar's chat list stays
+  // in sync and a chat can be reopened later without re-hitting the backend.
+  useEffect(() => {
+    if (!sessionId || state.status === "idle") return;
+    saveChatState(sessionId, titleRef.current || "New chat", state);
+    setHistory(listChats());
+  }, [sessionId, state]);
 
   const openStream = useCallback(
     (sid: string) => {
@@ -113,6 +124,8 @@ export function useResearchStream() {
 
   const start = useCallback(
     async (question: string) => {
+      nextTranscriptId.current = 0;
+      titleRef.current = titleFromQuestion(question);
       const entry: TranscriptEntry = {
         id: nextTranscriptId.current++,
         question,
@@ -149,5 +162,35 @@ export function useResearchStream() {
     [sessionId, openStream],
   );
 
-  return { sessionId, state, start, ask };
+  const newChat = useCallback(() => {
+    closeStream();
+    titleRef.current = "";
+    nextTranscriptId.current = 0;
+    setSessionId(null);
+    setState(initialState);
+  }, [closeStream]);
+
+  const loadChat = useCallback(
+    (sid: string) => {
+      const saved = loadChatState(sid);
+      if (!saved) return;
+      closeStream();
+      titleRef.current = saved.transcript[0]?.question ? titleFromQuestion(saved.transcript[0].question) : "";
+      nextTranscriptId.current = saved.transcript.length;
+      setSessionId(sid);
+      setState({ ...saved, status: saved.status === "running" ? "done" : saved.status });
+    },
+    [closeStream],
+  );
+
+  const removeChat = useCallback(
+    (sid: string) => {
+      deleteChat(sid);
+      setHistory(listChats());
+      if (sid === sessionId) newChat();
+    },
+    [sessionId, newChat],
+  );
+
+  return { sessionId, state, history, start, ask, newChat, loadChat, removeChat };
 }
