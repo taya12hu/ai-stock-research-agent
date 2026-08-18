@@ -9,6 +9,15 @@ from app.tools.yahoo_finance import FundamentalsData, aget_fundamentals
 
 logger = get_logger("app.graph.nodes.fundamentals")
 
+_METRIC_FIELDS = (
+    "market_cap", "trailing_pe", "forward_pe", "price_to_book", "profit_margin",
+    "revenue_growth", "earnings_growth", "return_on_equity", "total_debt", "total_cash",
+)
+
+
+def _has_usable_metrics(data: FundamentalsData) -> bool:
+    return any(getattr(data, field) is not None for field in _METRIC_FIELDS)
+
 
 def _build_prompt(data: FundamentalsData) -> str:
     facts = "\n".join(
@@ -51,6 +60,11 @@ async def fundamentals_node(state: ResearchState) -> dict:
     except YahooFinanceError as exc:
         log_event(logger, "fundamentals data fetch failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
         return {"per_ticker_results": {ticker: {"fundamentals": failed_result(str(exc))}}}
+
+    if not _has_usable_metrics(data):
+        message = f"no usable financial metrics were available for {ticker} (data may be unavailable for this ticker)"
+        log_event(logger, "fundamentals data lacked usable metrics", session_id=state["session_id"], ticker=ticker)
+        return {"per_ticker_results": {ticker: {"fundamentals": failed_result(message)}}}
 
     try:
         analysis = await run_structured_analysis(_build_prompt(data))
