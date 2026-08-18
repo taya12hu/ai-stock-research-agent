@@ -39,12 +39,15 @@ async def synthesis_single_node(state: ResearchState) -> dict:
 
     prompt = (
         f"You are writing a concise research report for {ticker} for a retail investor "
-        "who wants an informed overview, not investment advice. Below are findings from "
-        "three independent analysts (fundamentals, technical, news/sentiment). Write a "
-        "cohesive 3-5 paragraph report combining their perspectives into one narrative. "
+        "who wants an informed overview and a clear take. Below are findings from three "
+        "independent analysts (fundamentals, technical, news/sentiment). Write a cohesive "
+        "3-5 paragraph report combining their perspectives into one narrative. "
         f"{citation_instruction(all_findings)} If a section below says 'Unavailable', "
-        "explicitly mention that gap in the report rather than omitting it silently. Do "
-        "not give buy/sell/hold advice.\n\n"
+        "explicitly mention that gap in the report rather than omitting it silently. End "
+        "with a line starting exactly 'Verdict: ' followed by Buy, Sell, or Hold and a "
+        "one-sentence rationale grounded only in the findings above, plus a confidence "
+        "qualifier (low/medium/high) based on how complete the underlying data was. Note "
+        "that this is not personalized financial advice.\n\n"
         f"{sections}"
     )
 

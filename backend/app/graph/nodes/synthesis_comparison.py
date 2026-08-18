@@ -48,9 +48,11 @@ async def synthesis_comparison_node(state: ResearchState) -> dict:
         "independent analysts (fundamentals, technical, news/sentiment). Write a genuine "
         "structured comparison — not three separate reports stapled together — covering "
         "relative valuation, relative momentum/technicals, and relative sentiment across "
-        f"the stocks. {citation_instruction(all_findings)}{failed_note} This is purely "
-        "informational; explicitly state this is not investment advice, and do not give "
-        "buy/sell/hold recommendations or declare an overall 'winner'.\n\n"
+        f"the stocks. {citation_instruction(all_findings)}{failed_note} End with a "
+        "'Verdict' section giving one line per stock in the form 'TICKER: Buy/Sell/Hold — "
+        "one-sentence rationale', grounded only in the findings above, followed by a "
+        "sentence naming which stock the data favors overall (if any) and why. Note that "
+        "this is not personalized financial advice.\n\n"
         f"{ticker_blocks}"
     )
 
