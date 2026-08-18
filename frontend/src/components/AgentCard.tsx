@@ -20,6 +20,19 @@ const STATUS_LABELS: Record<AgentStatus, string> = {
   failed: "failed",
 };
 
+// Backend exceptions occasionally leak raw provider error payloads (JSON blobs, stack
+// traces) instead of a short human-readable message. Those aren't useful to a user, so
+// swap them for a generic message; the raw text stays available via the tooltip/console
+// for debugging.
+function friendlyError(raw: string): string {
+  const looksRaw = raw.length > 180 || /\{['"]?error['"]?\s*:|Traceback|Error code:/i.test(raw);
+  if (looksRaw) {
+    console.error("Agent error:", raw);
+    return "Something went wrong while analyzing this ticker. Please try again.";
+  }
+  return raw;
+}
+
 export function AgentCard({ agent, state }: { agent: AgentName; state?: AgentState }) {
   const status = state?.status ?? "queued";
 
@@ -36,7 +49,11 @@ export function AgentCard({ agent, state }: { agent: AgentName; state?: AgentSta
         </span>
       </div>
 
-      {status === "failed" && state?.error && <p className="mt-2 text-xs text-rose-400">{state.error}</p>}
+      {status === "failed" && state?.error && (
+        <p className="mt-2 text-xs text-rose-400" title={state.error}>
+          {friendlyError(state.error)}
+        </p>
+      )}
 
       {status === "ok" && (
         <>
