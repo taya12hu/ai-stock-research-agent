@@ -85,8 +85,8 @@ async def _run_followup_and_publish(graph: CompiledStateGraph, session_id: str, 
 
 
 async def _stream_run(graph: CompiledStateGraph, session_id: str, run_input: dict[str, Any]) -> None:
-    await session_bus.publish(session_id, ev.run_started())
     try:
+        await session_bus.publish(session_id, ev.run_started())
         async for chunk in graph.astream(run_input, config=_thread_config(session_id), stream_mode="updates"):
             for node_name, update in chunk.items():
                 await _publish_for_node(session_id, node_name, update)

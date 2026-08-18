@@ -1,8 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { askFollowUp, startResearch, streamUrl } from "../api/client";
+import { ApiError, askFollowUp, startResearch, streamUrl } from "../api/client";
 import { deleteChat, listChats, loadChatState, saveChatState, titleFromQuestion, type ChatSummary } from "../lib/history";
 import { EVENT_TYPES, type AgentName, type ResearchEvent, type ResearchStreamState, type TickerAgents, type TranscriptEntry } from "../types";
+
+// The request never reached the graph (network failure, or the backend rejected it
+// before a run started), so there's no SSE stream to report a `run_failed` event —
+// these are the only two failure shapes `start`/`ask` can actually produce, and each
+// gets a message a user can act on rather than the raw fetch/HTTP error text.
+function describeStartError(err: unknown): string {
+  console.error("Failed to start research:", err);
+  return "Something went wrong starting this research. Please try again.";
+}
+
+function describeAskError(err: unknown): string {
+  if (err instanceof ApiError && err.status === 404) {
+    return "This chat's research session has expired or could not be found. Start a new chat to continue.";
+  }
+  console.error("Failed to send follow-up:", err);
+  return "Something went wrong sending that message. Please try again.";
+}
 
 const initialState: ResearchStreamState = {
   status: "idle",
@@ -133,9 +150,13 @@ export function useResearchStream() {
         isReportUpdate: false,
       };
       setState({ ...initialState, status: "running", transcript: [entry] });
-      const { session_id } = await startResearch(question);
-      setSessionId(session_id);
-      openStream(session_id);
+      try {
+        const { session_id } = await startResearch(question);
+        setSessionId(session_id);
+        openStream(session_id);
+      } catch (err) {
+        setState((prev) => ({ ...prev, status: "error", error: describeStartError(err) }));
+      }
     },
     [openStream],
   );
@@ -156,8 +177,12 @@ export function useResearchStream() {
         notes: [],
         transcript: [...prev.transcript, entry],
       }));
-      await askFollowUp(sessionId, question);
-      openStream(sessionId);
+      try {
+        await askFollowUp(sessionId, question);
+        openStream(sessionId);
+      } catch (err) {
+        setState((prev) => ({ ...prev, status: "error", error: describeAskError(err) }));
+      }
     },
     [sessionId, openStream],
   );

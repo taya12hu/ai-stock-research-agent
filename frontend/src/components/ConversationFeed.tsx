@@ -59,21 +59,25 @@ export function ConversationFeed({ state }: { state: ResearchStreamState }) {
 
       {state.finalReport && <FinalReport markdown={state.finalReport} />}
 
-      {followUps.map((entry) => (
-        <div key={entry.id} className="space-y-3">
-          <UserBubble question={entry.question} />
-          {entry.answer && <p className="text-sm leading-relaxed text-slate-300">{entry.answer}</p>}
-          {entry.isReportUpdate && !entry.answer && (
-            <p className="text-xs italic text-indigo-400">↑ Updated the report above with fresh data</p>
-          )}
-          {!entry.answer && !entry.isReportUpdate && (
-            <div className="flex items-center gap-2 text-sm text-slate-500">
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-400" />
-              Thinking…
-            </div>
-          )}
-        </div>
-      ))}
+      {followUps.map((entry, i) => {
+        const isLastFollowUp = i === followUps.length - 1;
+        const isPending = !entry.answer && !entry.isReportUpdate;
+        return (
+          <div key={entry.id} className="space-y-3">
+            <UserBubble question={entry.question} />
+            {entry.answer && <p className="text-sm leading-relaxed text-slate-300">{entry.answer}</p>}
+            {entry.isReportUpdate && !entry.answer && (
+              <p className="text-xs italic text-indigo-400">↑ Updated the report above with fresh data</p>
+            )}
+            {isPending && isLastFollowUp && state.status === "running" && (
+              <div className="flex items-center gap-2 text-sm text-slate-500">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-400" />
+                Thinking…
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
