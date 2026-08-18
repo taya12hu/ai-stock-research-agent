@@ -102,6 +102,32 @@ def _has_real_data(info: dict) -> bool:
     )
 
 
+# Bare tickers (e.g. "TCS") often only exist on a non-US exchange. yfinance requires an
+# explicit exchange suffix for those (e.g. "TCS.NS" for NSE), so a plain symbol with no
+# dot is retried against the most common Indian exchanges before giving up.
+_FALLBACK_SUFFIXES = (".NS", ".BO")
+
+
+def _ticker_candidates(ticker: str) -> list[str]:
+    if "." in ticker:
+        return [ticker]
+    return [ticker, *(f"{ticker}{suffix}" for suffix in _FALLBACK_SUFFIXES)]
+
+
+# yfinance echoes the requested symbol back into `info["symbol"]` even when nothing else
+# resolved (e.g. a bare ticker that only trades on an exchange requiring a suffix), so
+# `_has_real_data` alone isn't enough to pick the *best* candidate — prefer one that
+# actually has financial metrics before falling back to a merely-not-empty one.
+_FUNDAMENTAL_METRIC_KEYS = (
+    "marketCap", "trailingPE", "forwardPE", "priceToBook", "profitMargins",
+    "revenueGrowth", "earningsGrowth", "returnOnEquity", "totalDebt", "totalCash",
+)
+
+
+def _has_fundamental_metrics(info: dict) -> bool:
+    return any(info.get(key) is not None for key in _FUNDAMENTAL_METRIC_KEYS)
+
+
 # --- technical indicator math -------------------------------------------------------
 
 
@@ -164,29 +190,50 @@ def _fifty_two_week_range(history: pd.DataFrame) -> tuple[float, float] | None:
 
 
 def ticker_exists(ticker: str) -> bool:
-    try:
-        info = _fetch_info(ticker.upper())
-    except Exception as exc:  # noqa: BLE001 - any fetch failure => can't confirm existence
-        log_event(
-            logger, "ticker_exists check failed", level=logging.WARNING,
-            ticker=ticker, error=str(exc),
-        )
-        return False
-    return _has_real_data(info)
+    for candidate in _ticker_candidates(ticker.upper()):
+        try:
+            info = _fetch_info(candidate)
+        except Exception as exc:  # noqa: BLE001 - any fetch failure => can't confirm existence
+            log_event(
+                logger, "ticker_exists check failed", level=logging.WARNING,
+                ticker=candidate, error=str(exc),
+            )
+            continue
+        if _has_real_data(info):
+            return True
+    return False
 
 
 def get_fundamentals(ticker: str) -> FundamentalsData:
-    ticker = ticker.upper()
-    try:
-        info = _fetch_info(ticker)
-    except Exception as exc:
-        raise YahooFinanceError(f"failed to fetch fundamentals for {ticker}: {exc}") from exc
+    base = ticker.upper()
+    last_error: Exception | None = None
+    info: dict | None = None
+    resolved_ticker = base
+    fallback: tuple[str, dict] | None = None
+    for candidate in _ticker_candidates(base):
+        try:
+            candidate_info = _fetch_info(candidate)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if not _has_real_data(candidate_info):
+            continue
+        if _has_fundamental_metrics(candidate_info):
+            resolved_ticker, info = candidate, candidate_info
+            break
+        if fallback is None:
+            fallback = (candidate, candidate_info)
+    else:
+        if info is None and fallback is not None:
+            resolved_ticker, info = fallback
 
-    if not _has_real_data(info):
-        raise YahooFinanceError(f"no fundamentals data for {ticker} (ticker may be invalid)")
+    if info is None:
+        if last_error is not None:
+            raise YahooFinanceError(f"failed to fetch fundamentals for {base}: {last_error}") from last_error
+        raise YahooFinanceError(f"no fundamentals data for {base} (ticker may be invalid)")
 
     return FundamentalsData(
-        ticker=ticker,
+        ticker=resolved_ticker,
         name=info.get("shortName") or info.get("longName"),
         sector=info.get("sector"),
         industry=info.get("industry"),
@@ -208,15 +255,26 @@ def get_fundamentals(ticker: str) -> FundamentalsData:
 
 
 def get_technical_data(ticker: str, period: str = "1y") -> TechnicalData:
-    ticker = ticker.upper()
-    try:
-        history = _fetch_history(ticker, period)
-    except Exception as exc:
-        raise YahooFinanceError(f"failed to fetch price history for {ticker}: {exc}") from exc
+    base = ticker.upper()
+    last_error: Exception | None = None
+    history: pd.DataFrame | None = None
+    resolved_ticker = base
+    for candidate in _ticker_candidates(base):
+        try:
+            candidate_history = _fetch_history(candidate, period)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if candidate_history is not None and not candidate_history.empty:
+            resolved_ticker, history = candidate, candidate_history
+            break
 
-    if history is None or history.empty:
-        raise YahooFinanceError(f"no price history for {ticker} (ticker may be invalid)")
+    if history is None:
+        if last_error is not None:
+            raise YahooFinanceError(f"failed to fetch price history for {base}: {last_error}") from last_error
+        raise YahooFinanceError(f"no price history for {base} (ticker may be invalid)")
 
+    ticker = resolved_ticker
     close = history["Close"]
     macd = _macd(close)
     fifty_two_week = _fifty_two_week_range(history)
