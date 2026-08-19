@@ -1,7 +1,8 @@
 import { FinalReport } from "./FinalReport";
+import { Markdown } from "./Markdown";
 import { StatusBanner } from "./StatusBanner";
 import { TickerGroup } from "./TickerGroup";
-import type { ResearchStreamState } from "../types";
+import type { ResearchStreamState, TranscriptEntry } from "../types";
 
 const QUERY_TYPE_LABELS: Record<string, string> = {
   single: "Single-stock analysis",
@@ -19,65 +20,79 @@ function UserBubble({ question }: { question: string }) {
   );
 }
 
-export function ConversationFeed({ state }: { state: ResearchStreamState }) {
-  const [firstTurn, ...followUps] = state.transcript;
-  const resolvingTickers = state.status === "running" && state.tickers.length === 0;
-  const researching = state.status === "running" && state.tickers.length > 0 && !state.finalReport;
+// Everything for one turn — its progress, ticker cards, and eventual answer/report —
+// renders together, in this order, immediately after that turn's own question. Nothing
+// here reads from outside `entry`, so a turn's cards can never appear detached from (or
+// stuck above) the message that actually triggered them.
+function TranscriptTurn({
+  entry,
+  isFirst,
+  isLast,
+  running,
+}: {
+  entry: TranscriptEntry;
+  isFirst: boolean;
+  isLast: boolean;
+  running: boolean;
+}) {
+  const active = isLast && running;
+  // Still being classified: no tickers resolved yet, and no plain-reply answer either
+  // (a clarification question, off-topic/discovery reply, etc. also lands as `answer`
+  // with zero tickers — the guard stops the spinner the instant either arrives).
+  const awaitingClassification = active && entry.tickers.length === 0 && !entry.answer && !entry.report;
+  const researching = active && entry.tickers.length > 0 && !entry.report;
 
   return (
-    <div className="mx-auto max-w-6xl space-y-5 px-6 py-8">
-      {firstTurn && <UserBubble question={firstTurn.question} />}
+    <div className="space-y-3">
+      <UserBubble question={entry.question} />
+      {entry.answer && <Markdown>{entry.answer}</Markdown>}
 
-      <StatusBanner notes={state.notes} error={state.error} />
+      <StatusBanner notes={entry.notes} error={entry.error} />
 
-      {resolvingTickers && (
+      {awaitingClassification && (
         <div className="flex items-center gap-2 text-sm text-slate-500">
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-400" />
-          Classifying request and resolving tickers…
+          {isFirst ? "Classifying request and resolving tickers…" : "Thinking…"}
         </div>
       )}
 
-      {state.queryType && (
+      {entry.queryType && entry.tickers.length > 0 && (
         <p className="text-xs font-medium uppercase tracking-wider text-slate-500">
-          {QUERY_TYPE_LABELS[state.queryType] ?? state.queryType}
-          {state.tickers.length > 0 && (
-            <span className="text-slate-400"> — {state.tickers.join(", ")}</span>
-          )}
+          {QUERY_TYPE_LABELS[entry.queryType] ?? entry.queryType}
+          <span className="text-slate-400"> — {entry.tickers.join(", ")}</span>
         </p>
       )}
 
-      {state.tickers.map((ticker) => (
-        <TickerGroup key={ticker} ticker={ticker} agents={state.agents[ticker] ?? {}} />
+      {entry.tickers.map((ticker) => (
+        <TickerGroup key={ticker} ticker={ticker} agents={entry.agents[ticker] ?? {}} />
       ))}
 
       {researching && (
         <div className="flex items-center gap-2 text-sm text-slate-500">
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-400" />
-          Researching {state.tickers.join(", ")}…
+          Researching {entry.tickers.join(", ")}…
         </div>
       )}
 
-      {state.finalReport && <FinalReport markdown={state.finalReport} />}
+      {entry.report && <FinalReport markdown={entry.report} />}
+    </div>
+  );
+}
 
-      {followUps.map((entry, i) => {
-        const isLastFollowUp = i === followUps.length - 1;
-        const isPending = !entry.answer && !entry.isReportUpdate;
-        return (
-          <div key={entry.id} className="space-y-3">
-            <UserBubble question={entry.question} />
-            {entry.answer && <p className="text-sm leading-relaxed text-slate-300">{entry.answer}</p>}
-            {entry.isReportUpdate && !entry.answer && (
-              <p className="text-xs italic text-indigo-400">↑ Updated the report above with fresh data</p>
-            )}
-            {isPending && isLastFollowUp && state.status === "running" && (
-              <div className="flex items-center gap-2 text-sm text-slate-500">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-400" />
-                Thinking…
-              </div>
-            )}
-          </div>
-        );
-      })}
+export function ConversationFeed({ state }: { state: ResearchStreamState }) {
+  const running = state.status === "running";
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-5 px-6 py-8">
+      {state.transcript.map((entry, index) => (
+        <TranscriptTurn
+          key={entry.id}
+          entry={entry}
+          isFirst={index === 0}
+          isLast={index === state.transcript.length - 1}
+          running={running}
+        />
+      ))}
     </div>
   );
 }

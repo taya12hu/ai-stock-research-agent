@@ -13,6 +13,14 @@ export interface ChatSummary {
   updatedAt: number;
 }
 
+interface StoredChat {
+  state: ResearchStreamState;
+  // How many of this session's SSE events have already been applied to `state` — needed
+  // so resuming a saved chat and asking another follow-up doesn't replay the whole
+  // session's event history again (see streamUrl's `afterId`).
+  lastEventId: number;
+}
+
 function readIndex(): ChatSummary[] {
   try {
     const raw = localStorage.getItem(INDEX_KEY);
@@ -30,9 +38,15 @@ export function listChats(): ChatSummary[] {
   return readIndex().sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-export function saveChatState(sessionId: string, title: string, state: ResearchStreamState): void {
+export function saveChatState(
+  sessionId: string,
+  title: string,
+  state: ResearchStreamState,
+  lastEventId: number,
+): void {
   try {
-    localStorage.setItem(`${CHAT_KEY_PREFIX}${sessionId}`, JSON.stringify(state));
+    const stored: StoredChat = { state, lastEventId };
+    localStorage.setItem(`${CHAT_KEY_PREFIX}${sessionId}`, JSON.stringify(stored));
     const index = readIndex().filter((c) => c.sessionId !== sessionId);
     index.push({ sessionId, title, updatedAt: Date.now() });
     writeIndex(index);
@@ -41,10 +55,10 @@ export function saveChatState(sessionId: string, title: string, state: ResearchS
   }
 }
 
-export function loadChatState(sessionId: string): ResearchStreamState | null {
+export function loadChatState(sessionId: string): StoredChat | null {
   try {
     const raw = localStorage.getItem(`${CHAT_KEY_PREFIX}${sessionId}`);
-    return raw ? (JSON.parse(raw) as ResearchStreamState) : null;
+    return raw ? (JSON.parse(raw) as StoredChat) : null;
   } catch {
     return null;
   }

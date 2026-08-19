@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 interface Props {
   onSubmit: (question: string) => void;
@@ -10,6 +10,14 @@ interface Props {
 export function QuestionInput({ onSubmit, disabled, placeholder, variant = "bar" }: Props) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Focuses on mount (covers page load / this component becoming available after a
+  // conditional-render swap) and again whenever the field re-enables after a run
+  // finishes — a disabled textarea can't take focus, so mount alone would miss the
+  // follow-up bar, which is always disabled at the instant it first mounts.
+  useEffect(() => {
+    if (!disabled) textareaRef.current?.focus();
+  }, [disabled]);
 
   const submit = () => {
     const trimmed = value.trim();

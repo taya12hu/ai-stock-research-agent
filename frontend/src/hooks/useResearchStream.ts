@@ -23,14 +23,15 @@ function describeAskError(err: unknown): string {
 
 const initialState: ResearchStreamState = {
   status: "idle",
-  queryType: null,
-  tickers: [],
-  notes: [],
-  agents: {},
-  finalReport: null,
-  error: null,
   transcript: [],
 };
+
+function newEntry(id: number, question: string): TranscriptEntry {
+  return {
+    id, question, answer: null, report: null,
+    queryType: null, tickers: [], agents: {}, notes: [], error: null,
+  };
+}
 
 function setAgent(
   agents: Record<string, TickerAgents>,
@@ -44,54 +45,78 @@ function setAgent(
   };
 }
 
-function attachToLastEntry(
+// Every event that carries turn-scoped data (progress, results, the final answer/report)
+// targets the LAST transcript entry — the one currently in flight — rather than a
+// shared top-level field. That's what makes a turn's cards render immediately after its
+// own question: there's no separate global slot for them to get stuck in.
+function updateLastEntry(
   transcript: TranscriptEntry[],
-  patch: Partial<Pick<TranscriptEntry, "answer" | "isReportUpdate">>,
+  update: (entry: TranscriptEntry) => TranscriptEntry,
 ): TranscriptEntry[] {
   if (transcript.length === 0) return transcript;
   const updated = [...transcript];
   const lastIndex = updated.length - 1;
-  updated[lastIndex] = { ...updated[lastIndex], ...patch };
+  updated[lastIndex] = update(updated[lastIndex]);
   return updated;
 }
 
 function applyEvent(prev: ResearchStreamState, event: ResearchEvent): ResearchStreamState {
   switch (event.type) {
     case "run_started":
-      return { ...prev, status: "running", error: null };
+      return { ...prev, status: "running" };
     case "router_completed":
       return {
         ...prev,
-        queryType: event.query_type,
-        tickers: event.tickers,
-        notes: [...prev.notes, ...event.notes],
+        transcript: updateLastEntry(prev.transcript, (e) => ({
+          ...e,
+          queryType: event.query_type,
+          tickers: event.tickers,
+          notes: [...e.notes, ...event.notes],
+        })),
       };
     case "followup_classified":
-      return { ...prev, notes: [...prev.notes, ...event.notes] };
+      return {
+        ...prev,
+        transcript: updateLastEntry(prev.transcript, (e) => ({ ...e, notes: [...e.notes, ...event.notes] })),
+      };
     case "agent_started":
-      return { ...prev, agents: setAgent(prev.agents, event.ticker, event.agent, { status: "running" }) };
+      return {
+        ...prev,
+        transcript: updateLastEntry(prev.transcript, (e) => ({
+          ...e, agents: setAgent(e.agents, event.ticker, event.agent, { status: "running" }),
+        })),
+      };
     case "agent_completed":
       return {
         ...prev,
-        agents: setAgent(prev.agents, event.ticker, event.agent, {
-          status: event.status,
-          summary: event.summary,
-          findings: event.findings,
-          error: event.error,
-        }),
+        transcript: updateLastEntry(prev.transcript, (e) => ({
+          ...e,
+          agents: setAgent(e.agents, event.ticker, event.agent, {
+            status: event.status,
+            summary: event.summary,
+            findings: event.findings,
+            error: event.error,
+          }),
+        })),
       };
     case "report_ready":
       return {
         ...prev,
-        finalReport: event.final_report,
-        transcript: attachToLastEntry(prev.transcript, { isReportUpdate: true }),
+        transcript: updateLastEntry(prev.transcript, (e) => ({ ...e, report: event.final_report })),
       };
     case "followup_answer_ready":
-      return { ...prev, transcript: attachToLastEntry(prev.transcript, { answer: event.answer }) };
+      return {
+        ...prev,
+        transcript: updateLastEntry(prev.transcript, (e) => ({ ...e, answer: event.answer })),
+      };
     case "run_completed":
       return { ...prev, status: "done" };
     case "run_failed":
-      return { ...prev, status: "error", error: event.error };
+      return {
+        ...prev,
+        status: "error",
+        transcript: updateLastEntry(prev.transcript, (e) => ({ ...e, error: event.error })),
+      };
     default:
       return prev;
   }
@@ -104,6 +129,15 @@ export function useResearchStream() {
   const eventSourceRef = useRef<EventSource | null>(null);
   const nextTranscriptId = useRef(0);
   const titleRef = useRef<string>("");
+  // How many of this session's SSE events have been applied so far. `openStream` is
+  // called fresh (a brand-new EventSource, not a browser-level reconnect) at the start
+  // of every turn, so without this the backend would replay the entire session's event
+  // history — including prior turns' answers — on every single follow-up.
+  const lastEventIdRef = useRef(0);
+  // Set right before loadChat's setState so the effect below can tell "just opened an
+  // existing chat" apart from "this session got new activity" — opening a chat must not
+  // bump its position in the sidebar, only new messages should.
+  const justLoadedRef = useRef(false);
 
   const closeStream = useCallback(() => {
     eventSourceRef.current?.close();
@@ -114,17 +148,22 @@ export function useResearchStream() {
   // in sync and a chat can be reopened later without re-hitting the backend.
   useEffect(() => {
     if (!sessionId || state.status === "idle") return;
-    saveChatState(sessionId, titleRef.current || "New chat", state);
+    if (justLoadedRef.current) {
+      justLoadedRef.current = false;
+      return;
+    }
+    saveChatState(sessionId, titleRef.current || "New chat", state, lastEventIdRef.current);
     setHistory(listChats());
   }, [sessionId, state]);
 
   const openStream = useCallback(
     (sid: string) => {
       closeStream();
-      const es = new EventSource(streamUrl(sid));
+      const es = new EventSource(streamUrl(sid, lastEventIdRef.current));
       eventSourceRef.current = es;
 
       const handle = (raw: MessageEvent<string>) => {
+        if (raw.lastEventId) lastEventIdRef.current = Number(raw.lastEventId);
         const event = JSON.parse(raw.data) as ResearchEvent;
         setState((prev) => applyEvent(prev, event));
         if (event.type === "run_completed" || event.type === "run_failed") {
@@ -142,20 +181,21 @@ export function useResearchStream() {
   const start = useCallback(
     async (question: string) => {
       nextTranscriptId.current = 0;
+      lastEventIdRef.current = 0;
       titleRef.current = titleFromQuestion(question);
-      const entry: TranscriptEntry = {
-        id: nextTranscriptId.current++,
-        question,
-        answer: null,
-        isReportUpdate: false,
-      };
-      setState({ ...initialState, status: "running", transcript: [entry] });
+      const entry = newEntry(nextTranscriptId.current++, question);
+      setState({ status: "running", transcript: [entry] });
       try {
         const { session_id } = await startResearch(question);
         setSessionId(session_id);
         openStream(session_id);
       } catch (err) {
-        setState((prev) => ({ ...prev, status: "error", error: describeStartError(err) }));
+        const message = describeStartError(err);
+        setState((prev) => ({
+          ...prev,
+          status: "error",
+          transcript: updateLastEntry(prev.transcript, (e) => ({ ...e, error: message })),
+        }));
       }
     },
     [openStream],
@@ -164,24 +204,22 @@ export function useResearchStream() {
   const ask = useCallback(
     async (question: string) => {
       if (!sessionId) return;
-      const entry: TranscriptEntry = {
-        id: nextTranscriptId.current++,
-        question,
-        answer: null,
-        isReportUpdate: false,
-      };
+      const entry = newEntry(nextTranscriptId.current++, question);
       setState((prev) => ({
         ...prev,
         status: "running",
-        error: null,
-        notes: [],
         transcript: [...prev.transcript, entry],
       }));
       try {
         await askFollowUp(sessionId, question);
         openStream(sessionId);
       } catch (err) {
-        setState((prev) => ({ ...prev, status: "error", error: describeAskError(err) }));
+        const message = describeAskError(err);
+        setState((prev) => ({
+          ...prev,
+          status: "error",
+          transcript: updateLastEntry(prev.transcript, (e) => ({ ...e, error: message })),
+        }));
       }
     },
     [sessionId, openStream],
@@ -191,6 +229,7 @@ export function useResearchStream() {
     closeStream();
     titleRef.current = "";
     nextTranscriptId.current = 0;
+    lastEventIdRef.current = 0;
     setSessionId(null);
     setState(initialState);
   }, [closeStream]);
@@ -200,10 +239,33 @@ export function useResearchStream() {
       const saved = loadChatState(sid);
       if (!saved) return;
       closeStream();
-      titleRef.current = saved.transcript[0]?.question ? titleFromQuestion(saved.transcript[0].question) : "";
-      nextTranscriptId.current = saved.transcript.length;
+      const { state: savedState, lastEventId } = saved;
+      titleRef.current = savedState.transcript[0]?.question
+        ? titleFromQuestion(savedState.transcript[0].question)
+        : "";
+      nextTranscriptId.current = savedState.transcript.length;
+      lastEventIdRef.current = lastEventId;
+      justLoadedRef.current = true;
       setSessionId(sid);
-      setState({ ...saved, status: saved.status === "running" ? "done" : saved.status });
+      setState({
+        status: savedState.status === "running" ? "done" : savedState.status,
+        // Defensive defaults for a chat saved before per-turn fields existed (this
+        // session's own history, or an older one from before this change) — at runtime
+        // an old chat's JSON can genuinely lack these keys despite what the type
+        // claims, so a missing field just means that turn renders without cards,
+        // never a crash.
+        transcript: savedState.transcript.map((e) => ({
+          id: e.id,
+          question: e.question,
+          answer: e.answer,
+          report: e.report,
+          queryType: e.queryType ?? null,
+          tickers: e.tickers ?? [],
+          agents: e.agents ?? {},
+          notes: e.notes ?? [],
+          error: e.error ?? null,
+        })),
+      });
     },
     [closeStream],
   );
