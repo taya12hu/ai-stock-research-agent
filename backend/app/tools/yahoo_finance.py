@@ -32,6 +32,7 @@ import pandas as pd
 import yfinance as yf
 from cachetools import TTLCache, cached
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from yfinance.exceptions import YFRateLimitError
 
 from app.config import settings
 from app.logging_config import get_logger, log_event, trace
@@ -45,11 +46,14 @@ _history_cache: TTLCache = TTLCache(maxsize=256, ttl=_CACHE_TTL_SECONDS)
 
 # yfinance raises plain requests/urllib errors on real network trouble; it does NOT
 # raise these for an invalid ticker (see module docstring), so retrying on them is safe.
-_RETRYABLE = (ConnectionError, TimeoutError, OSError)
+# YFRateLimitError is included too: cloud/datacenter IPs (Render, AWS, GCP, ...) get
+# throttled by Yahoo far more aggressively than residential ones, so a longer backoff
+# here is the difference between a real request succeeding and failing outright.
+_RETRYABLE = (ConnectionError, TimeoutError, OSError, YFRateLimitError)
 
 _retry_network = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=1, max=6),
     retry=retry_if_exception_type(_RETRYABLE),
     reraise=True,
 )
