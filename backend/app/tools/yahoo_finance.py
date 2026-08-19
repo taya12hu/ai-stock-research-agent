@@ -125,13 +125,16 @@ def _is_fully_usable(ticker: str) -> bool:
     """
     try:
         info = _fetch_info(ticker)
-    except Exception:  # noqa: BLE001 - any fetch failure => not usable
+    except Exception as exc:  # noqa: BLE001 - any fetch failure => not usable
+        logger.warning("yahoo_finance info fetch failed for %r: %r", ticker, exc)
         return False
     if not _has_real_data(info):
+        logger.warning("yahoo_finance info fetch returned no usable data for %r: %r", ticker, info)
         return False
     try:
         history = _fetch_history(ticker, "1y")
-    except Exception:  # noqa: BLE001 - any fetch failure => not usable
+    except Exception as exc:  # noqa: BLE001 - any fetch failure => not usable
+        logger.warning("yahoo_finance history fetch failed for %r: %r", ticker, exc)
         return False
     return history is not None and not history.empty
 
