@@ -167,12 +167,17 @@ def _no_tickers_node(state: ResearchState) -> dict:
     # (see `notes`' own dual purpose: normally an aside alongside a real report, but the
     # sole content of the reply when it's this one). `conversation_history` still gets
     # the plain assistant text, matching every other plain-reply node.
-    detail = " ".join(state.get("notes", []))
-    reply = (
-        f"{detail} Could you double-check the name or ticker, or try a different company?"
-        if detail
-        else "I couldn't tell which company you meant — could you name one directly, e.g. 'AAPL' or 'Apple'?"
-    )
+    notes = state.get("notes", [])
+    detail = " ".join(notes)
+    if not detail:
+        reply = "I couldn't tell which company you meant — could you name one directly, e.g. 'AAPL' or 'Apple'?"
+    elif notes and all("isn't currently supported" in n for n in notes):
+        # Nothing to "double-check" here — the ticker(s) were resolved just fine, they're
+        # just outside the app's US-only coverage, so the generic closer would wrongly
+        # imply a typo.
+        reply = f"{detail} Happy to help with a US-listed company instead."
+    else:
+        reply = f"{detail} Could you double-check the name or ticker, or try a different company?"
     return {
         "followup_answer": reply,
         "conversation_history": [{"role": "assistant", "content": reply}],
