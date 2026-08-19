@@ -24,16 +24,17 @@ async def synthesis_comparison_node(state: ResearchState) -> dict:
     failed = [t for t in tickers if t not in usable]
 
     if len(usable) < 2:
-        report = (
-            f"# Comparison: {' vs '.join(tickers)}\n\n"
-            "Unable to complete a comparison — usable data was available for fewer than "
-            f"two of the requested tickers. Failed: {', '.join(failed) or 'n/a'}."
+        # A plain reply, not a "Comparison" report card — fewer than two tickers came
+        # back usable, so there's no comparison to show.
+        reply = (
+            "I wasn't able to complete this comparison — usable data was available for "
+            f"fewer than two of the requested tickers. Failed: {', '.join(failed) or 'n/a'}."
         )
         log_event(
             logger, "comparison synthesis: insufficient usable tickers",
             session_id=state["session_id"], tickers=tickers,
         )
-        return {"final_report": report, "conversation_history": [{"role": "assistant", "content": report}]}
+        return {"followup_answer": reply, "conversation_history": [{"role": "assistant", "content": reply}]}
 
     ticker_blocks = "\n\n".join(ticker_section_block(t, per_ticker.get(t, {})) for t in tickers)
     all_findings = [f for t in tickers for f in collect_findings(per_ticker.get(t, {}))]
