@@ -4,6 +4,18 @@ export interface StartResponse {
   session_id: string;
 }
 
+// Carries the HTTP status so callers can branch on it (e.g. 404 = session not found)
+// without parsing the error message string.
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
@@ -12,7 +24,7 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
   });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(`Request to ${path} failed (${res.status}): ${detail}`);
+    throw new ApiError(res.status, detail || res.statusText);
   }
   return res.json() as Promise<T>;
 }
