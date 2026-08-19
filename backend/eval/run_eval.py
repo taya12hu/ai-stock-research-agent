@@ -40,6 +40,11 @@ def _snapshot(result: dict[str, Any]) -> dict[str, Any]:
         "final_report": result.get("final_report"),
         "per_ticker_results": result.get("per_ticker_results"),
         "followup_path": result.get("followup_path"),
+        # Populated for a plain-reply turn (clarification question, off-topic/discovery
+        # explanation, follow-up answer) rather than a research report — needed so
+        # check_schema and the discovery-fabrication check can see turns that never
+        # produce a final_report at all.
+        "followup_answer": result.get("followup_answer"),
     }
 
 
@@ -55,6 +60,7 @@ async def run_case(graph: Any, case: dict[str, Any]) -> dict[str, Any]:
             "question": case["question"],
             "result_snapshot": _snapshot(result),
             "elapsed_seconds": time.perf_counter() - start,
+            "expected_discovery": case.get("expected_discovery"),
         }
     ]
 
@@ -67,15 +73,22 @@ async def run_case(graph: Any, case: dict[str, Any]) -> dict[str, Any]:
                 "result_snapshot": _snapshot(result),
                 "elapsed_seconds": time.perf_counter() - f_start,
                 "expected_path": followup.get("expected_path"),
+                "expected_discovery": followup.get("expected_discovery"),
             }
         )
 
     checks = run_all_checks(turns)
-    try:
-        judge_scores = await judge_report(case["question"], result["query_type"], result["final_report"] or "")
-        judge_dict: dict[str, Any] = judge_scores.model_dump()
-    except Exception as exc:  # eval-harness robustness: one bad judge call shouldn't kill the run
-        judge_dict = {"error": str(exc)}
+    if result.get("final_report"):
+        try:
+            judge_scores = await judge_report(case["question"], result["query_type"], result["final_report"])
+            judge_dict: dict[str, Any] = judge_scores.model_dump()
+        except Exception as exc:  # eval-harness robustness: one bad judge call shouldn't kill the run
+            judge_dict = {"error": str(exc)}
+    else:
+        # The last turn is a plain reply (clarification/off-topic/discovery), not a
+        # research report — scoring an empty report against report-quality dimensions
+        # (grounding, structure, ...) would be meaningless, not just uninformative.
+        judge_dict = {"skipped": "no final_report produced by the last turn (non-research reply)"}
 
     return {
         "id": case["id"],
