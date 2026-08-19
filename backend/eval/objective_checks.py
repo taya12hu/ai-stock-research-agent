@@ -34,14 +34,33 @@ def _all_agent_results(per_ticker_results: dict[str, Any] | None) -> list[dict[s
 
 
 def check_schema(snapshot: dict[str, Any]) -> CheckResult:
+    # A turn produces EITHER a research report OR a plain reply (clarification question,
+    # off-topic/discovery-limitation explanation, follow-up answer) — never neither.
+    has_report = isinstance(snapshot.get("final_report"), str) and bool(snapshot["final_report"])
+    has_reply = isinstance(snapshot.get("followup_answer"), str) and bool(snapshot["followup_answer"])
     ok = (
-        isinstance(snapshot.get("final_report"), str)
-        and bool(snapshot["final_report"])
+        (has_report or has_reply)
         and snapshot.get("query_type") in {"single", "portfolio", "comparison"}
         and isinstance(snapshot.get("tickers"), list)
     )
-    detail = "final_report/query_type/tickers present and well-typed" if ok else f"malformed snapshot: {snapshot}"
+    detail = "final_report/followup_answer, query_type, tickers present and well-typed" if ok else f"malformed snapshot: {snapshot}"
     return CheckResult("schema", ok, detail)
+
+
+def check_no_fabricated_discovery_tickers(turn: dict[str, Any]) -> CheckResult | None:
+    """For a turn tagged `expected_discovery: true` in the dataset — a request this app
+    can't fulfill because it would require screening a market/sector for candidates —
+    the only hard safety property that matters is that no ticker got fabricated to fill
+    the gap. Whether the model produced a discovery-limitation reply or fell back to one
+    clarifying question, both are safe; inventing a candidate company is the one
+    outcome this must never allow, mirroring what `check_citation_integrity` guards
+    against on the report side."""
+    if not turn.get("expected_discovery"):
+        return None
+    tickers = turn["result_snapshot"].get("tickers") or []
+    ok = not tickers
+    detail = "no ticker fabricated" if ok else f"fabricated ticker(s) for an unsupported discovery request: {tickers}"
+    return CheckResult("no_fabricated_discovery_tickers", ok, detail)
 
 
 def check_citation_integrity(snapshot: dict[str, Any]) -> CheckResult:
@@ -75,14 +94,17 @@ def check_findings_well_formed(snapshot: dict[str, Any]) -> CheckResult:
 
 def check_total_failure_explicit(snapshot: dict[str, Any]) -> CheckResult:
     """If literally every agent failed, the deterministic no-LLM-call fallback path
-    guarantees a specific message — this is a hard contract, not LLM-dependent prose."""
+    guarantees a specific message — this is a hard contract, not LLM-dependent prose.
+    It's a plain reply (`followup_answer`), not a "Research Report" card — there's no
+    real content to put in a report when every source failed — so this checks either
+    field, whichever the synthesis node actually used."""
     all_results = _all_agent_results(snapshot.get("per_ticker_results"))
     all_failed = bool(all_results) and all(r["status"] == "failed" for r in all_results)
     if not all_failed:
         return CheckResult("total_failure_explicit", True, "not applicable (not a total-failure case)")
-    report = (snapshot.get("final_report") or "").lower()
-    ok = "unable to complete" in report
-    detail = "deterministic failure message present" if ok else "total failure but report doesn't say so"
+    text = ((snapshot.get("final_report") or "") + (snapshot.get("followup_answer") or "")).lower()
+    ok = "wasn't able to complete" in text or "unable to complete" in text
+    detail = "deterministic failure message present" if ok else "total failure but no message says so"
     return CheckResult("total_failure_explicit", ok, detail)
 
 
@@ -125,6 +147,10 @@ def run_all_checks(turns: list[dict[str, Any]]) -> list[CheckResult]:
         check_partial_failure_mentioned(final_snapshot),
         check_latency(turns[-1]["elapsed_seconds"], len(final_snapshot.get("tickers") or [])),
     ]
+    for turn in turns:
+        discovery_check = check_no_fabricated_discovery_tickers(turn)
+        if discovery_check:
+            checks.append(discovery_check)
     for turn in turns[1:]:
         followup_check = check_followup_path(turn)
         if followup_check:

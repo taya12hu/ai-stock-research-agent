@@ -27,12 +27,11 @@ async def synthesis_single_node(state: ResearchState) -> dict:
             f"{AGENT_LABELS[a]}: {ticker_results.get(a, {}).get('error', 'not run')}"  # type: ignore[union-attr]
             for a in AGENTS
         )
-        report = (
-            f"# Research Report: {ticker}\n\n"
-            f"Unable to complete research — every data source failed.\n\n{errors}"
-        )
+        # A plain reply, not a "Research Report" card — every source failed, there's
+        # nothing to report.
+        reply = f"I wasn't able to complete research for {ticker} — every data source failed. {errors}"
         log_event(logger, "synthesis: all agents failed", session_id=state["session_id"], ticker=ticker)
-        return {"final_report": report, "conversation_history": [{"role": "assistant", "content": report}]}
+        return {"followup_answer": reply, "conversation_history": [{"role": "assistant", "content": reply}]}
 
     sections = "\n\n".join(section_text(agent, ticker_results.get(agent)) for agent in AGENTS)
     all_findings = collect_findings(ticker_results)

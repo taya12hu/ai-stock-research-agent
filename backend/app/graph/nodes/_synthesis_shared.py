@@ -51,13 +51,27 @@ def ticker_all_failed(ticker_results: TickerResults) -> bool:
 
 
 def sources_section(findings: list[Finding]) -> str:
+    """One line per *unique* source, not per finding. Fundamentals/technical findings
+    for a given ticker all cite the same single Yahoo Finance fetch (the node builds one
+    `Source` and reuses it across every finding it produces — see fundamentals_node.py/
+    technical_node.py), so without deduping this reads as 5 independent fundamentals
+    sources and 5 independent technical sources when it's really one of each; only news
+    findings genuinely cite distinct URLs. Groups by the source's own identity (label,
+    url, as_of) rather than by agent/ticker, since that's what's actually shared or not —
+    no assumption needed about which agents happen to reuse a source.
+    """
     if not findings:
         return ""
-    lines = ["", "", "**Sources**"]
+    grouped: dict[tuple[str, str | None, str], list[str]] = {}
     for f in findings:
         src = f["source"]
-        url_part = f" — {src['url']}" if src.get("url") else ""
-        lines.append(f"- [{f['id']}] {src['label']}{url_part} (as of {src['as_of']})")
+        key = (src["label"], src.get("url"), src["as_of"])
+        grouped.setdefault(key, []).append(f["id"])
+
+    lines = ["", "", "**Sources**"]
+    for (label, url, as_of), ids in grouped.items():
+        url_part = f" — {url}" if url else ""
+        lines.append(f"- [{', '.join(ids)}] {label}{url_part} (as of {as_of})")
     return "\n".join(lines)
 
 

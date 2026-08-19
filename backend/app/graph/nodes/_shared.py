@@ -13,12 +13,12 @@ from typing import TypeVar
 
 import groq
 from pydantic import BaseModel, Field
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.graph.state import AgentName, Finding, Source
-from app.llm.errors import LLMAnalysisError
+from app.llm.errors import RATE_LIMIT_MESSAGE, LLMAnalysisError, is_rate_limited
 from app.llm.groq_client import get_chat_model
-from app.logging_config import get_logger
+from app.logging_config import get_logger, log_event
 
 logger = get_logger("app.graph.nodes")
 
@@ -28,6 +28,21 @@ _RETRYABLE_GROQ_ERRORS = (
     groq.RateLimitError,
     groq.InternalServerError,
 )
+
+
+def _is_tool_use_failed(exc: BaseException) -> bool:
+    """True for Groq's 400 'the model didn't call the required tool' — distinct from a
+    genuinely malformed request (also a 400, but not retryable: it would fail identically
+    every time). This one is model sampling variance, not a persistent block: the model
+    sometimes answers a forced-tool-call prompt in plain text instead of invoking the
+    tool, and asking again — same prompt, same schema — usually succeeds. Confirmed from
+    a real failure: Groq's `failed_generation` field showed the model HAD produced a
+    complete, well-grounded analysis, it just didn't format it as a tool call.
+    """
+    if not isinstance(exc, groq.BadRequestError):
+        return False
+    body = exc.body if isinstance(exc.body, dict) else {}
+    return (body.get("error") or {}).get("code") == "tool_use_failed"
 
 MAX_FINDINGS_PER_AGENT = 5
 
@@ -50,7 +65,7 @@ T = TypeVar("T", bound=BaseModel)
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=8),
-    retry=retry_if_exception_type(_RETRYABLE_GROQ_ERRORS),
+    retry=retry_if_exception_type(_RETRYABLE_GROQ_ERRORS) | retry_if_exception(_is_tool_use_failed),
     reraise=True,
 )
 def _invoke_structured(prompt: str, schema: type[T]) -> T:
@@ -67,7 +82,15 @@ async def run_structured_analysis(prompt: str, schema: type[T] = NodeAnalysis) -
     except LLMAnalysisError:
         raise
     except Exception as exc:
-        raise LLMAnalysisError(f"LLM analysis failed: {exc}") from exc
+        # The raw provider exception (e.g. a Groq API error body) is logged here, in
+        # full, for debugging — but never becomes the message on `LLMAnalysisError`
+        # itself. Every caller that surfaces `str(exc)` to a user (a failed `AgentResult`,
+        # a `notes` entry) does so via this one exception type, so keeping its message
+        # human-safe here is what keeps it human-safe everywhere downstream.
+        log_event(logger, "structured analysis call failed", error=str(exc))
+        if is_rate_limited(exc):
+            raise LLMAnalysisError(RATE_LIMIT_MESSAGE) from exc
+        raise LLMAnalysisError("The analysis service is temporarily unavailable.") from exc
 
 
 def build_findings(

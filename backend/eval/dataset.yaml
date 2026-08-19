@@ -60,3 +60,51 @@
 - id: portfolio_natural_language
   question: "I hold Microsoft, NVIDIA, and Amazon stock — how is my portfolio doing?"
   followups: []
+
+# --- discovery detection: this app analyzes stocks it's given, it does not screen a
+# market/sector for candidates. These cases guard against the two failure modes that
+# matter most: fabricating a shortlist, and turning an unsupported request into an
+# unnecessary clarification loop (asking for market cap/dividend/risk tolerance etc.).
+# `expected_discovery: true` is checked mechanically (objective_checks.py) — it only
+# asserts no ticker was fabricated, not that the model literally set an internal flag,
+# since either a discovery-limitation reply or one clarifying question are both safe
+# outcomes; fabricating a candidate is the only real failure.
+
+- id: discovery_sector_scope
+  question: "Which Indian healthcare stocks have been hit hardest by recent negative news?"
+  expected_discovery: true
+  followups: []
+
+- id: discovery_best_of_criterion
+  question: "Find me the best IT stocks."
+  expected_discovery: true
+  followups: []
+
+- id: discovery_undervalued_criterion
+  question: "Find stocks that are undervalued."
+  expected_discovery: true
+  followups: []
+
+- id: discovery_revealed_via_clarification_reply
+  # Reproduces the reported bug conversation directly: a scope-free vague question
+  # correctly asks which stocks, then the reply reveals the user actually wants the
+  # market screened — that reply must not spiral into more preference questions.
+  question: "Which stock is more affected by recent negative news?"
+  followups:
+    - question: "I'm asking about any Indian stock I can purchase."
+      expected_discovery: true
+
+- id: not_discovery_when_specific_stocks_given
+  # Negative case: specific companies ARE named, so this must proceed as a normal
+  # comparison — the discovery check must not misfire just because the question is
+  # framed as "which one is best".
+  question: "I'm considering Sun Pharma, Cipla and Dr Reddy's. Which one has been affected most by recent negative news?"
+  followups: []
+
+- id: discovery_followup_similar_stocks
+  # Discovery intent surfacing mid-session, not on the first message — must not be
+  # forced into add_ticker (inventing a company) or answer (improvising a suggestion).
+  question: "Analyze AAPL"
+  followups:
+    - question: "What other good tech stocks should I look at?"
+      expected_discovery: true

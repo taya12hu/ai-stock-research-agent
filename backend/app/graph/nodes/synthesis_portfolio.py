@@ -24,13 +24,11 @@ async def synthesis_portfolio_node(state: ResearchState) -> dict:
     failed = [t for t in tickers if t not in usable]
 
     if not usable:
-        report = (
-            "# Portfolio Research Report\n\n"
-            "Unable to complete research — every holding failed to return data: "
-            f"{', '.join(failed)}."
-        )
+        # A plain reply, not a "Portfolio Research Report" card — every holding failed,
+        # there's nothing to report.
+        reply = f"I wasn't able to complete this portfolio research — every holding failed to return data: {', '.join(failed)}."
         log_event(logger, "portfolio synthesis: all tickers failed", session_id=state["session_id"], tickers=tickers)
-        return {"final_report": report, "conversation_history": [{"role": "assistant", "content": report}]}
+        return {"followup_answer": reply, "conversation_history": [{"role": "assistant", "content": reply}]}
 
     ticker_blocks = "\n\n".join(ticker_section_block(t, per_ticker.get(t, {})) for t in tickers)
     all_findings = [f for t in tickers for f in collect_findings(per_ticker.get(t, {}))]

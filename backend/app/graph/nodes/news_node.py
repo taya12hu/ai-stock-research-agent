@@ -8,6 +8,7 @@ from app.llm.errors import LLMAnalysisError
 from app.logging_config import get_logger, log_event
 from app.tools.errors import WebSearchError
 from app.tools.web_search import SearchResult, asearch_news
+from app.tools.yahoo_finance import aget_company_name
 
 logger = get_logger("app.graph.nodes.news")
 
@@ -26,18 +27,28 @@ class NewsAnalysis(NodeAnalysis):
     overall_sentiment: str = Field(description="One of: positive, negative, neutral, mixed")
 
 
-def _build_prompt(ticker: str, results: list[SearchResult]) -> str:
+def _build_prompt(ticker: str, company_name: str | None, results: list[SearchResult]) -> str:
     articles = "\n\n".join(
         f"[{i + 1}] {r.title}\n{r.snippet}\n(source: {r.source or 'web'}, date: {r.date or 'unknown'})"
         for i, r in enumerate(results)
     )
+    subject = f"{company_name} ({ticker})" if company_name else ticker
     return (
         "You are a market sentiment analyst. Based ONLY on the numbered news articles "
-        f"below about {ticker}, write a short summary of recent sentiment/news, an "
+        f"below, write a short summary of recent sentiment/news about {subject}, an "
         "overall_sentiment (positive/negative/neutral/mixed), and list specific "
         "findings. For each finding, set article_index to the number of the article it "
         "is grounded in. Do not invent facts not present in the articles, and do not "
         "give investment advice.\n\n"
+        f"IMPORTANT: this is a generic web search, not guaranteed to be about the right "
+        f"company — a short ticker or company word (e.g. 'Titan') can surface entirely "
+        f"unrelated companies that happen to share it (e.g. 'Titan Mining Corp', 'Titan "
+        f"International') alongside real matches. Before using an article, confirm it "
+        f"is actually about {subject} specifically, not a different company with a "
+        "similar or overlapping name. Silently skip any article that isn't — it's fine "
+        "to end up with fewer findings than articles, and if none of them are actually "
+        "about the right company, say so in the summary instead of forcing findings out "
+        "of irrelevant articles.\n\n"
         f"Articles:\n{articles}"
     )
 
@@ -55,9 +66,19 @@ def _finding_source(article: SearchResult | None) -> Source:
 
 async def news_node(state: ResearchState) -> dict:
     ticker = state["tickers"][0]
+    # `ticker` may carry a resolved exchange suffix (e.g. "TCS.NS" — see
+    # `aresolve_ticker`); strip it for the search query, since a suffix helps Yahoo
+    # Finance disambiguate a symbol but only hurts a general web search's relevance.
+    search_term = ticker.split(".")[0]
+    # The bare ticker/word alone is often ambiguous (e.g. "TITAN" matches Titan Company
+    # Limited, Titan Mining Corp, and Titan International indiscriminately) — the
+    # company's actual name narrows the search itself, on top of the prompt-level check
+    # below. Best-effort: falls back to the bare word if the lookup fails for any reason.
+    company_name = await aget_company_name(ticker)
+    query = f"{company_name} ({search_term}) stock news" if company_name else f"{search_term} stock news"
 
     try:
-        results = await asearch_news(f"{ticker} stock news", max_results=6)
+        results = await asearch_news(query, max_results=6)
     except WebSearchError as exc:
         log_event(logger, "news search failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
         return {"per_ticker_results": {ticker: {"news": failed_result(str(exc))}}}
@@ -67,7 +88,7 @@ async def news_node(state: ResearchState) -> dict:
         return {"per_ticker_results": {ticker: {"news": ok_result(summary, [])}}}
 
     try:
-        analysis = await run_structured_analysis(_build_prompt(ticker, results), schema=NewsAnalysis)
+        analysis = await run_structured_analysis(_build_prompt(ticker, company_name, results), schema=NewsAnalysis)
     except LLMAnalysisError as exc:
         log_event(logger, "news analysis failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
         return {"per_ticker_results": {ticker: {"news": failed_result(str(exc))}}}

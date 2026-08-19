@@ -12,7 +12,7 @@ from typing import Annotated, Literal, TypedDict
 AgentName = Literal["fundamentals", "technical", "news"]
 AGENT_NAMES: tuple[AgentName, ...] = ("fundamentals", "technical", "news")
 QueryType = Literal["single", "portfolio", "comparison"]
-FollowUpPath = Literal["answer", "refresh", "add_ticker"]
+FollowUpPath = Literal["answer", "refresh", "add_ticker", "unrelated", "discovery", "needs_clarification"]
 
 
 class Source(TypedDict):
@@ -87,6 +87,39 @@ class ResearchState(TypedDict):
     followup_path: FollowUpPath | None
     followup_targets: list[FollowUpTarget]
     followup_answer: str | None
+    # Set by `router_node` when a request is clearly stock-related but names no company
+    # (e.g. "which stock has stronger sentiment?"). While True, `_entry_router` routes the
+    # *next* turn deterministically to `clarification_response_node` rather than letting an
+    # LLM re-classify it as a new, unrelated request — see ARCHITECTURE.md and
+    # `clarification_response_node`'s docstring for why this is a state check, not a
+    # classification.
+    awaiting_clarification: bool
+    clarification_question: str | None
+    # The original ambiguous question, kept only for prompt context (so the clarification
+    # LLM call can judge whether a reply is answering it or abandoning it). The *decision*
+    # already made about it — its query type — is `pending_intent` below, and is reused
+    # as-is rather than re-derived from this raw text a second time.
+    pending_question: str | None
+    # The query_type decided when clarification was first asked (e.g. "comparison" for
+    # "which stock has stronger sentiment?"). A resolving reply ("TCS and Infosys") only
+    # needs to supply the missing tickers — the intent itself is not re-guessed.
+    pending_intent: QueryType | None
+    # Set (by router/clarification/follow-up alike) when a message isn't stock-related —
+    # a ready-to-show reply rather than a research trigger. Always explicitly cleared
+    # (set back to None) on every other outcome so a stale value can't leak into a later,
+    # on-topic turn.
+    off_topic_reply: str | None
+    # Which entry path last set `awaiting_clarification=True` — "router" for a fresh
+    # session (or a clarification reply that abandoned the question for something else
+    # equally ambiguous), "followup" for an already-researched session where a follow-up
+    # question was itself too vague to act on (e.g. "how's the other one doing?" with 3+
+    # tickers in the session). `_entry_router` (build_graph.py) reads this to send the
+    # *next* turn to the matching resolver — `clarification_response_node` or
+    # `followup_clarification_response_node` — since the two need different resolution
+    # logic (replace the session's tickers vs. merge into them). Always explicitly
+    # cleared (set back to None) alongside `awaiting_clarification` on every other
+    # outcome, same discipline as `off_topic_reply`.
+    clarification_origin: Literal["router", "followup"] | None
 
 
 def new_state(
@@ -112,6 +145,12 @@ def new_state(
         followup_path=None,
         followup_targets=[],
         followup_answer=None,
+        awaiting_clarification=False,
+        clarification_question=None,
+        pending_question=None,
+        pending_intent=None,
+        off_topic_reply=None,
+        clarification_origin=None,
     )
 
 

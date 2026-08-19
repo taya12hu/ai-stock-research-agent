@@ -23,7 +23,7 @@ from fastapi.responses import StreamingResponse
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel
 
-from app.graph.build_graph import SPECIALIST_NODES
+from app.graph.build_graph import SPECIALIST_NODES, router_outcome
 from app.graph.state import new_state
 from app.logging_config import get_logger, log_event
 from app.streaming import events as ev
@@ -66,8 +66,26 @@ async def start_research(payload: ResearchRequest, request: Request) -> Research
 async def ask_followup(session_id: str, payload: FollowUpRequest, request: Request) -> ResearchResponse:
     graph = request.app.state.graph
     existing = await graph.aget_state(_thread_config(session_id))
-    if not existing.values.get("per_ticker_results"):
+    # Any completed turn — research, a clarification question asked, or an off-topic
+    # reply — means the session exists and the conversation can continue. Checking
+    # `conversation_history` (populated on every turn) rather than just
+    # `per_ticker_results`/`awaiting_clarification` avoids 404ing a session whose first
+    # message was off-topic, or one whose only clarification attempt dead-ended.
+    has_prior_turn = bool(existing.values.get("conversation_history"))
+    if not has_prior_turn:
         raise HTTPException(status_code=404, detail="No prior research session found for this session_id")
+
+    running = _running_tasks.get(session_id)
+    if running is not None and not running.done():
+        # The frontend already disables its input while `status === "running"`
+        # (App.tsx), which covers a single tab — this guards the same session against a
+        # second tab, a client retry, or any other caller racing a `POST .../ask` against
+        # a run that's still writing to the same LangGraph checkpointer thread. Checking
+        # `.done()` rather than just dict membership matters: `_stream_run`'s `finally`
+        # pops the entry, but only after the task has actually finished, so a plain
+        # membership check would report "busy" for one extra tick right at completion —
+        # `.done()` is accurate the instant the task's coroutine returns.
+        raise HTTPException(status_code=409, detail="A run is already in progress for this session")
 
     task = asyncio.create_task(_run_followup_and_publish(graph, session_id, payload.question))
     _running_tasks[session_id] = task
@@ -105,17 +123,24 @@ async def _publish_for_node(session_id: str, node_name: str, update: dict[str, A
     if not update:
         return
 
-    if node_name == "router":
+    if node_name in ("router", "clarification_response"):
         tickers: list[str] = update.get("tickers", [])
+        # `router_outcome` is the exact same precedence `_fan_out_after_router` routes
+        # on (build_graph.py) — asking it here, rather than re-guessing "empty tickers
+        # means these notes are redundant", is what keeps this correct if that field
+        # ever legitimately carries notes on an ask_clarification/off_topic outcome too
+        # (neither of those downstream nodes composes its reply from notes, so a note
+        # there would need its own banner, not silent suppression by coincidence).
+        notes = [] if router_outcome(update) == "no_tickers" else update.get("notes", [])
         await session_bus.publish(
-            session_id, ev.router_completed(update.get("query_type", ""), tickers, update.get("notes", []))
+            session_id, ev.router_completed(update.get("query_type", ""), tickers, notes)
         )
         for ticker in tickers:
             for agent in SPECIALIST_NODES:
                 await session_bus.publish(session_id, ev.agent_started(ticker, agent))
         return
 
-    if node_name == "followup_router":
+    if node_name in ("followup_router", "followup_clarification_response"):
         path = update.get("followup_path", "answer")
         targets = update.get("followup_targets", [])
         target_tickers = [t["ticker"] for t in targets]
@@ -125,7 +150,9 @@ async def _publish_for_node(session_id: str, node_name: str, update: dict[str, A
                 await session_bus.publish(session_id, ev.agent_started(target["ticker"], agent))
         return
 
-    if node_name == "answer_from_context" and "followup_answer" in update:
+    # `answer_from_context` and `ask_clarification` both produce a plain text assistant
+    # reply this way — keyed on the field, not the node name, since either can set it.
+    if "followup_answer" in update:
         await session_bus.publish(session_id, ev.followup_answer_ready(update["followup_answer"]))
         return
 
@@ -145,8 +172,19 @@ def _format_sse(event_id: int, event: dict[str, Any]) -> str:
 
 @router.get("/research/{session_id}/stream")
 async def stream_research(session_id: str, request: Request) -> StreamingResponse:
-    last_event_id = request.headers.get("last-event-id")
-    after_id = int(last_event_id) if last_event_id else 0
+    # A browser-native EventSource auto-reconnect (same connection, dropped mid-run) sends
+    # `Last-Event-ID` itself. But our own code opens a brand-new EventSource at the start of
+    # every turn (see useResearchStream.ts's `openStream`), which never carries that header —
+    # so the client passes how far it's already consumed via `after_id` instead, covering the
+    # whole session rather than just the current run. Without this, every follow-up would
+    # replay the entire session's event history (including prior turns' answers) from
+    # scratch, misapplying old events to the new turn's transcript entry.
+    header_last_id = request.headers.get("last-event-id")
+    query_after_id = request.query_params.get("after_id")
+    after_id = max(
+        int(header_last_id) if header_last_id else 0,
+        int(query_after_id) if query_after_id else 0,
+    )
 
     async def event_generator() -> AsyncIterator[str]:
         queue = await session_bus.register_live_queue(session_id)

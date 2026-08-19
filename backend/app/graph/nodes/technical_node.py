@@ -9,10 +9,15 @@ from app.tools.yahoo_finance import TechnicalData, aget_technical_data
 
 logger = get_logger("app.graph.nodes.technical")
 
+# See MIN_FACTS_FOR_ANALYSIS in fundamentals_node.py for why this guard exists: a
+# forced-tool-call LLM asked to analyze near-empty data tends to refuse the tool call
+# outright rather than say so gracefully, which surfaces as a raw provider API error.
+MIN_FACTS_FOR_ANALYSIS = 2
 
-def _build_prompt(data: TechnicalData) -> str:
-    facts = "\n".join(
-        f"- {label}: {value}"
+
+def _facts(data: TechnicalData) -> list[tuple[str, object]]:
+    return [
+        (label, value)
         for label, value in [
             ("Last close (USD)", data.last_close),
             ("20-day SMA", data.sma_20),
@@ -26,7 +31,11 @@ def _build_prompt(data: TechnicalData) -> str:
             ("52-week low (USD)", data.fifty_two_week_low),
         ]
         if value is not None
-    )
+    ]
+
+
+def _build_prompt(data: TechnicalData, facts: list[tuple[str, object]]) -> str:
+    facts_text = "\n".join(f"- {label}: {value}" for label, value in facts)
     return (
         "You are a technical analyst. Based ONLY on the price/indicator data below for "
         f"{data.ticker}, write a short summary of the stock's price trend and momentum, "
@@ -34,7 +43,7 @@ def _build_prompt(data: TechnicalData) -> str:
         "relationship suggests). Every finding's evidence must be a number literally "
         "present in the data — do not invent figures, and do not give investment "
         "advice (buy/sell/hold recommendations of your own).\n\n"
-        f"Data (as of {data.as_of}):\n{facts}"
+        f"Data (as of {data.as_of}):\n{facts_text}"
     )
 
 
@@ -47,8 +56,20 @@ async def technical_node(state: ResearchState) -> dict:
         log_event(logger, "technical data fetch failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
         return {"per_ticker_results": {ticker: {"technical": failed_result(str(exc))}}}
 
+    facts = _facts(data)
+    if len(facts) < MIN_FACTS_FOR_ANALYSIS:
+        log_event(
+            logger, "technical: too little data to analyze", session_id=state["session_id"],
+            ticker=ticker, fact_count=len(facts),
+        )
+        return {
+            "per_ticker_results": {
+                ticker: {"technical": failed_result(f"Not enough price/indicator data was available for {ticker} to analyze.")}
+            }
+        }
+
     try:
-        analysis = await run_structured_analysis(_build_prompt(data))
+        analysis = await run_structured_analysis(_build_prompt(data, facts))
     except LLMAnalysisError as exc:
         log_event(logger, "technical analysis failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
         return {"per_ticker_results": {ticker: {"technical": failed_result(str(exc))}}}
@@ -56,7 +77,10 @@ async def technical_node(state: ResearchState) -> dict:
     source = Source(
         type="yahoo_finance",
         label=f"{ticker} price history (Yahoo Finance)",
-        url=None,
+        # Same rationale as fundamentals_node's Source — the public quote page, not the
+        # literal internal API endpoint yfinance actually calls, but a real, verifiable
+        # link showing the same underlying price data.
+        url=f"https://finance.yahoo.com/quote/{ticker}",
         as_of=data.as_of,
     )
     findings: list[Finding] = build_findings(ticker, "technical", analysis, source)

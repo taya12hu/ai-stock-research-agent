@@ -64,20 +64,23 @@ export const EVENT_TYPES: ResearchEvent["type"][] = [
 
 export type RunStatus = "idle" | "running" | "done" | "error";
 
+// Every field below except {id, question} is populated by events scoped to THIS turn
+// (see useResearchStream's applyEvent, which always targets the last transcript entry)
+// — so a turn's own progress/cards/answer render immediately after its own question,
+// never in a shared slot that visually detaches from whichever message triggered it.
 export interface TranscriptEntry {
   id: number;
   question: string;
   answer: string | null;
-  isReportUpdate: boolean;
+  report: string | null;
+  queryType: QueryType | null;
+  tickers: string[];
+  agents: Record<string, TickerAgents>;
+  notes: string[];
+  error: string | null;
 }
 
 export interface ResearchStreamState {
   status: RunStatus;
-  queryType: QueryType | null;
-  tickers: string[];
-  notes: string[];
-  agents: Record<string, TickerAgents>;
-  finalReport: string | null;
-  error: string | null;
   transcript: TranscriptEntry[];
 }

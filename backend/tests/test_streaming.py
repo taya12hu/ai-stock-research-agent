@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 
+from app.api.research_routes import _publish_for_node
 from app.streaming import session_bus
 
 
@@ -104,3 +105,62 @@ async def test_unregister_removes_only_that_queue() -> None:
     assert queue_a.empty()
 
     await session_bus.unregister_live_queue(session_id, queue_b)
+
+
+# --- _publish_for_node: notes only broadcast when they're not about to be redundant ---
+
+
+async def test_no_tickers_outcome_does_not_broadcast_notes_separately() -> None:
+    """When the router leaves tickers empty, those notes are exactly what
+    `_no_tickers_node` is about to compose into its reply verbatim (build_graph.py) —
+    broadcasting them here too would just send the same information twice."""
+    session_id = str(uuid.uuid4())
+    await _publish_for_node(
+        session_id, "router",
+        {"tickers": [], "query_type": "single", "notes": ["'MAXR' could not be found and was skipped."]},
+    )
+
+    events = [e for _, e in await session_bus.get_events_after(session_id, 0)]
+
+    assert events == [{"type": "router_completed", "query_type": "single", "tickers": [], "notes": []}]
+
+
+async def test_partial_ticker_failure_still_broadcasts_notes() -> None:
+    """When SOME tickers survive, the note about the one that didn't is a genuine
+    caveat alongside a real result — not redundant with anything — so it's still sent."""
+    session_id = str(uuid.uuid4())
+    await _publish_for_node(
+        session_id, "router",
+        {"tickers": ["AAPL"], "query_type": "single", "notes": ["'ZZZ' could not be found and was skipped."]},
+    )
+
+    events = [e for _, e in await session_bus.get_events_after(session_id, 0)]
+
+    assert events[0] == {
+        "type": "router_completed", "query_type": "single", "tickers": ["AAPL"],
+        "notes": ["'ZZZ' could not be found and was skipped."],
+    }
+
+
+async def test_clarification_question_outcome_still_broadcasts_notes_even_with_empty_tickers() -> None:
+    """Regression guard for a real gap found on review: the filter must key off the
+    actual routing outcome (router_outcome), not 'tickers is empty' as a stand-in for
+    it. Nothing stops the model from setting `unaddressed_note` on the same turn as
+    `needs_clarification` (the schema allows both independently) — if that ever
+    happens, `_ask_clarification_node` doesn't read `notes` at all, so suppressing it
+    here would lose that information outright, not just hide a duplicate."""
+    session_id = str(uuid.uuid4())
+    await _publish_for_node(
+        session_id, "router",
+        {
+            "tickers": [], "query_type": "single",
+            "notes": ["I can't help with recipes."],
+            "awaiting_clarification": True,
+        },
+    )
+
+    events = [e for _, e in await session_bus.get_events_after(session_id, 0)]
+
+    assert events == [
+        {"type": "router_completed", "query_type": "single", "tickers": [], "notes": ["I can't help with recipes."]}
+    ]

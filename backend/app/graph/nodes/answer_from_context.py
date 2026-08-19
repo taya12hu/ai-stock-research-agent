@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 
 from app.graph.state import ResearchState
+from app.llm.errors import RATE_LIMIT_MESSAGE, is_rate_limited
 from app.llm.groq_client import get_chat_model
 from app.logging_config import get_logger, log_event
 
@@ -38,13 +39,17 @@ async def answer_from_context_node(state: ResearchState) -> dict:
         response = await llm.ainvoke(_build_prompt(state))
         answer = response.content
     except Exception as exc:
+        # The raw provider exception (e.g. a rate-limit error body) is logged here, in
+        # full, for debugging — never shown to the user; see the equivalent guard in
+        # `_shared.py`'s run_structured_analysis for why.
         log_event(
             logger, "answer_from_context LLM call failed", level=logging.ERROR,
             session_id=state["session_id"], error=str(exc),
         )
         answer = (
-            "Sorry, I couldn't generate an answer to that follow-up right now "
-            f"({exc}). The most recent full report is still available above."
+            RATE_LIMIT_MESSAGE if is_rate_limited(exc) else
+            "Sorry, I couldn't generate an answer to that follow-up right now. "
+            "The most recent full report is still available above."
         )
 
     log_event(logger, "answer_from_context completed", session_id=state["session_id"])

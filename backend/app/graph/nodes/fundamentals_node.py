@@ -9,19 +9,17 @@ from app.tools.yahoo_finance import FundamentalsData, aget_fundamentals
 
 logger = get_logger("app.graph.nodes.fundamentals")
 
-_METRIC_FIELDS = (
-    "market_cap", "trailing_pe", "forward_pe", "price_to_book", "profit_margin",
-    "revenue_growth", "earnings_growth", "return_on_equity", "total_debt", "total_cash",
-)
+# Below this many populated fields, the data is too thin to write a real summary from —
+# a forced-tool-call LLM asked to analyze near-nothing tends to refuse the tool call
+# entirely rather than say so gracefully, which surfaces as a raw provider API error.
+# Give up deterministically instead, the same way `synthesis_single` does when every
+# agent failed outright.
+MIN_FACTS_FOR_ANALYSIS = 3
 
 
-def _has_usable_metrics(data: FundamentalsData) -> bool:
-    return any(getattr(data, field) is not None for field in _METRIC_FIELDS)
-
-
-def _build_prompt(data: FundamentalsData) -> str:
-    facts = "\n".join(
-        f"- {label}: {value}"
+def _facts(data: FundamentalsData) -> list[tuple[str, object]]:
+    return [
+        (label, value)
         for label, value in [
             ("Company", data.name),
             ("Sector", data.sector),
@@ -41,14 +39,18 @@ def _build_prompt(data: FundamentalsData) -> str:
             ("Analyst recommendation", data.recommendation),
         ]
         if value is not None
-    )
+    ]
+
+
+def _build_prompt(data: FundamentalsData, facts: list[tuple[str, object]]) -> str:
+    facts_text = "\n".join(f"- {label}: {value}" for label, value in facts)
     return (
         "You are a fundamentals research analyst. Based ONLY on the data below for "
         f"{data.ticker}, write a short summary of the company's financial health and "
         "list specific findings. Every finding's evidence must be a number or fact "
         "literally present in the data — do not invent figures, and do not give "
         "investment advice (buy/sell/hold recommendations of your own).\n\n"
-        f"Data (as of {data.as_of}):\n{facts}"
+        f"Data (as of {data.as_of}):\n{facts_text}"
     )
 
 
@@ -61,13 +63,20 @@ async def fundamentals_node(state: ResearchState) -> dict:
         log_event(logger, "fundamentals data fetch failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
         return {"per_ticker_results": {ticker: {"fundamentals": failed_result(str(exc))}}}
 
-    if not _has_usable_metrics(data):
-        message = f"no usable financial metrics were available for {ticker} (data may be unavailable for this ticker)"
-        log_event(logger, "fundamentals data lacked usable metrics", session_id=state["session_id"], ticker=ticker)
-        return {"per_ticker_results": {ticker: {"fundamentals": failed_result(message)}}}
+    facts = _facts(data)
+    if len(facts) < MIN_FACTS_FOR_ANALYSIS:
+        log_event(
+            logger, "fundamentals: too little data to analyze", session_id=state["session_id"],
+            ticker=ticker, fact_count=len(facts),
+        )
+        return {
+            "per_ticker_results": {
+                ticker: {"fundamentals": failed_result(f"Not enough fundamentals data was available for {ticker} to analyze.")}
+            }
+        }
 
     try:
-        analysis = await run_structured_analysis(_build_prompt(data))
+        analysis = await run_structured_analysis(_build_prompt(data, facts))
     except LLMAnalysisError as exc:
         log_event(logger, "fundamentals analysis failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
         return {"per_ticker_results": {ticker: {"fundamentals": failed_result(str(exc))}}}
@@ -75,7 +84,10 @@ async def fundamentals_node(state: ResearchState) -> dict:
     source = Source(
         type="yahoo_finance",
         label=f"{ticker} fundamentals (Yahoo Finance)",
-        url=None,
+        # Not literally the page this data was fetched from — yfinance calls Yahoo's
+        # data API directly, not this page — but it's the public page showing the same
+        # figures, and a real link a user can actually verify against beats none.
+        url=f"https://finance.yahoo.com/quote/{ticker}",
         as_of=data.as_of,
     )
     findings: list[Finding] = build_findings(ticker, "fundamentals", analysis, source)

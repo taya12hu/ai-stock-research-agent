@@ -37,6 +37,7 @@ export function askFollowUp(sessionId: string, question: string): Promise<StartR
   return postJSON<StartResponse>(`/research/${sessionId}/ask`, { question });
 }
 
-export function streamUrl(sessionId: string): string {
-  return `${API_BASE}/research/${sessionId}/stream`;
+export function streamUrl(sessionId: string, afterId?: number): string {
+  const suffix = afterId ? `?after_id=${afterId}` : "";
+  return `${API_BASE}/research/${sessionId}/stream${suffix}`;
 }

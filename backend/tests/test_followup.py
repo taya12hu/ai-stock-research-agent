@@ -3,10 +3,13 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import groq
+import httpx
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 import app.graph.nodes.answer_from_context as answer_mod
+import app.graph.nodes.followup_clarification_response_node as followup_clarification_mod
 import app.graph.nodes.followup_router_node as followup_mod
 import app.graph.nodes.fundamentals_node as fundamentals_mod
 import app.graph.nodes.news_node as news_mod
@@ -20,6 +23,7 @@ from app.graph.nodes._shared import LLMFinding, NodeAnalysis
 from app.graph.nodes.followup_router_node import FollowUpDecision
 from app.graph.nodes.news_node import NewsAnalysis, NewsLLMFinding
 from app.graph.state import new_state
+from app.llm.errors import LLMAnalysisError
 from app.tools.yahoo_finance import FundamentalsData, TechnicalData
 from app.tools.web_search import SearchResult
 
@@ -109,6 +113,9 @@ def _mock_tools(monkeypatch: pytest.MonkeyPatch, call_counts: dict[str, int] | N
         monkeypatch.setattr(fundamentals_mod, "aget_fundamentals", _counting(FAKE_FUNDAMENTALS, call_counts, "fundamentals"))
         monkeypatch.setattr(technical_mod, "aget_technical_data", _counting(FAKE_TECHNICAL, call_counts, "technical"))
         monkeypatch.setattr(news_mod, "asearch_news", _counting(FAKE_NEWS_RESULTS, call_counts, "news"))
+    # news_node also looks up the company's display name (as a search-query
+    # disambiguation aid) before searching — stub it so tests never hit the network.
+    monkeypatch.setattr(news_mod, "aget_company_name", _async_return(None))
     _mock_analysis(monkeypatch, fundamentals_mod)
     _mock_analysis(monkeypatch, technical_mod)
     _mock_analysis(monkeypatch, news_mod)
@@ -123,6 +130,15 @@ def _mock_followup_decision(monkeypatch: pytest.MonkeyPatch, **fields: Any) -> N
     monkeypatch.setattr(followup_mod, "run_structured_analysis", _fake)
 
 
+def _mock_followup_clarification_decision(monkeypatch: pytest.MonkeyPatch, **fields: Any) -> None:
+    decision = FollowUpDecision(**fields)
+
+    async def _fake(prompt: str, schema: type = FollowUpDecision) -> FollowUpDecision:  # noqa: ARG001
+        return decision
+
+    monkeypatch.setattr(followup_clarification_mod, "run_structured_analysis", _fake)
+
+
 async def _initial_run(
     monkeypatch: pytest.MonkeyPatch, checkpointer: InMemorySaver, thread_id: str
 ) -> tuple[dict, Any, dict]:
@@ -134,6 +150,66 @@ async def _initial_run(
     config = {"configurable": {"thread_id": thread_id}}
     result = await graph.ainvoke(state, config=config)
     return result, graph, config
+
+
+async def _initial_run_two_tickers(
+    monkeypatch: pytest.MonkeyPatch, checkpointer: InMemorySaver, thread_id: str
+) -> tuple[dict, Any, dict]:
+    _mock_tools(monkeypatch)
+    graph = build_research_graph(checkpointer=checkpointer)
+    state = new_state(
+        tickers=["AAPL", "MSFT"], query_type="comparison",
+        user_question="Compare AAPL and MSFT", session_id=thread_id,
+    )
+    config = {"configurable": {"thread_id": thread_id}}
+    result = await graph.ainvoke(state, config=config)
+    return result, graph, config
+
+
+async def test_answer_from_context_failure_message_is_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression guard for a real observed leak: this node calls the LLM directly
+    (not through run_structured_analysis), so it needs its own guard against putting a
+    raw provider error — e.g. a rate-limit body — straight into the user-facing answer."""
+    class _RaisingLLM:
+        async def ainvoke(self, prompt: str) -> None:  # noqa: ARG002
+            raise RuntimeError("Rate limit reached ... {'error': {'code': 'rate_limit_exceeded'}}")
+
+    monkeypatch.setattr(answer_mod, "get_chat_model", lambda temperature=0.2: _RaisingLLM())  # noqa: ARG005
+
+    state = new_state(
+        tickers=["AAPL"], query_type="single", user_question="Any updates?", session_id=str(uuid.uuid4()),
+    )
+    result = await answer_mod.answer_from_context_node(state)
+
+    assert "couldn't generate an answer" in result["followup_answer"]
+    assert "rate_limit_exceeded" not in result["followup_answer"]
+    assert "{'error'" not in result["followup_answer"]
+
+
+async def test_answer_from_context_rate_limit_gets_specific_friendly_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely exhausted quota gets a distinct, honest message — not the generic
+    'couldn't generate an answer' fallback used for other failures."""
+    def _rate_limit_error() -> groq.RateLimitError:
+        request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+        response = httpx.Response(429, request=request)
+        body = {"error": {"code": "rate_limit_exceeded", "message": "Rate limit reached ... tokens per day"}}
+        return groq.RateLimitError("rate limited", response=response, body=body)
+
+    class _RateLimitedLLM:
+        async def ainvoke(self, prompt: str) -> None:  # noqa: ARG002
+            raise _rate_limit_error()
+
+    monkeypatch.setattr(answer_mod, "get_chat_model", lambda temperature=0.2: _RateLimitedLLM())  # noqa: ARG005
+
+    state = new_state(
+        tickers=["AAPL"], query_type="single", user_question="Any updates?", session_id=str(uuid.uuid4()),
+    )
+    result = await answer_mod.answer_from_context_node(state)
+
+    assert "temporarily rate-limited" in result["followup_answer"]
+    assert "rate_limit_exceeded" not in result["followup_answer"]
 
 
 async def test_followup_answer_path_makes_no_new_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -153,6 +229,83 @@ async def test_followup_answer_path_makes_no_new_tool_calls(monkeypatch: pytest.
     assert result["final_report"] == original_report  # untouched
     assert call_counts == {}  # no specialist tool was re-invoked
     assert [m["role"] for m in result["conversation_history"][-2:]] == ["user", "assistant"]
+
+
+async def test_followup_unrelated_path_gets_polite_reply_without_running_agents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    initial, graph, config = await _initial_run(monkeypatch, checkpointer, thread_id)
+    original_report = initial["final_report"]
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_decision(
+        monkeypatch, path="unrelated", off_topic_reply="I can help with the stock research in this chat."
+    )
+
+    result = await graph.ainvoke({"user_question": "What's the weather today?"}, config=config)
+
+    assert result["followup_path"] == "unrelated"
+    assert result["followup_answer"] == "I can help with the stock research in this chat."
+    assert result["final_report"] == original_report  # untouched
+    assert call_counts == {}  # no specialist tool was invoked
+
+
+async def test_followup_discovery_path_gets_polite_reply_without_fabricating_tickers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'What other good IT stocks should I look at?' in an ongoing session must not be
+    forced into add_ticker (which would require inventing a company) or answer (which
+    risks improvising a suggestion) — it should explain the limitation, same as a fresh
+    discovery request would."""
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    initial, graph, config = await _initial_run(monkeypatch, checkpointer, thread_id)
+    original_report = initial["final_report"]
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_decision(
+        monkeypatch, path="discovery",
+        discovery_reply="I analyze stocks you provide — I don't screen for similar candidates.",
+    )
+
+    result = await graph.ainvoke({"user_question": "What other good IT stocks should I look at?"}, config=config)
+
+    assert result["followup_path"] == "discovery"
+    assert result["followup_answer"] == "I analyze stocks you provide — I don't screen for similar candidates."
+    assert result["final_report"] == original_report  # untouched
+    assert result["tickers"] == ["AAPL"]  # no fabricated ticker was added to the session
+    assert call_counts == {}  # no specialist tool was invoked
+
+
+async def test_followup_refresh_matches_bare_ticker_against_resolved_suffixed_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session's stored ticker may carry a resolved exchange suffix (e.g. 'TCS.NS' —
+    see `aresolve_ticker`), but a user talking about it in a follow-up says 'TCS', not
+    'TCS.NS'. Refresh targeting must still match."""
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    _mock_tools(monkeypatch)
+    graph = build_research_graph(checkpointer=checkpointer)
+    state = new_state(
+        tickers=["TCS.NS"], query_type="single", user_question="Analyze TCS", session_id=thread_id,
+    )
+    config = {"configurable": {"thread_id": thread_id}}
+    await graph.ainvoke(state, config=config)
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_decision(monkeypatch, path="refresh", refresh_tickers=["TCS"], refresh_agents=["news"])
+
+    result = await graph.ainvoke({"user_question": "Any fresh news on TCS?"}, config=config)
+
+    assert result["followup_path"] == "refresh"
+    assert call_counts == {"news": 1}
+    assert result["per_ticker_results"]["TCS.NS"]["fundamentals"]["status"] == "ok"  # preserved
 
 
 async def test_followup_refresh_path_only_calls_targeted_agent(
@@ -190,10 +343,10 @@ async def test_followup_add_ticker_flips_query_type_and_runs_all_agents(
     call_counts: dict[str, int] = {}
     _mock_tools(monkeypatch, call_counts)
 
-    async def _fake_exists(ticker: str) -> bool:  # noqa: ARG001
-        return True
+    async def _fake_resolve(ticker: str) -> str:
+        return ticker
 
-    monkeypatch.setattr(followup_mod, "aticker_exists", _fake_exists)
+    monkeypatch.setattr(followup_mod, "aresolve_ticker", _fake_resolve)
     _mock_followup_decision(monkeypatch, path="add_ticker", new_tickers=["MSFT"])
 
     result = await graph.ainvoke({"user_question": "Also add Microsoft"}, config=config)
@@ -228,3 +381,236 @@ async def test_followup_add_ticker_respects_max_tickers_cap(monkeypatch: pytest.
     assert "EXTRA" not in result["tickers"]
     assert call_counts == {}
     assert any("limit" in note.lower() for note in result["notes"])
+
+
+# --- follow-up "cannot tell which ticker" -> notes, not a silent no-op -------------------
+
+
+async def test_followup_refresh_naming_a_ticker_outside_the_session_explains_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for a real gap: `_plan_refresh` used to fall back to 'answer'
+    with zero notes when the named ticker didn't match anything in the session — the
+    user's refresh request would silently do nothing with no explanation."""
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    _, graph, config = await _initial_run(monkeypatch, checkpointer, thread_id)
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_decision(monkeypatch, path="refresh", refresh_tickers=["MSFT"], refresh_agents=["news"])
+
+    result = await graph.ainvoke({"user_question": "Any fresh news on MSFT?"}, config=config)
+
+    assert result["followup_path"] == "answer"
+    assert call_counts == {}
+    assert any("MSFT" in note and "AAPL" in note for note in result["notes"])
+
+
+async def test_followup_add_ticker_already_in_session_explains_why(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same gap as refresh, on the add_ticker side: asking to add a ticker that's already
+    in the session used to silently do nothing (no room-exceeded note, since the ticker
+    was filtered out before the cap check even ran)."""
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    _, graph, config = await _initial_run(monkeypatch, checkpointer, thread_id)
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_decision(monkeypatch, path="add_ticker", new_tickers=["AAPL"])
+
+    result = await graph.ainvoke({"user_question": "Add AAPL too"}, config=config)
+
+    assert result["followup_path"] == "answer"
+    assert result["tickers"] == ["AAPL"]  # unchanged
+    assert call_counts == {}
+    assert any("AAPL" in note and "already" in note for note in result["notes"])
+
+
+# --- follow-up clarification: a follow-up too vague to act on -----------------------
+
+
+async def test_followup_needs_clarification_asks_without_touching_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The headline gap this closes: before this, an ambiguous follow-up in a
+    multi-ticker session had no way to ask back and was forced into 'answer', which
+    could confidently answer about the wrong ticker."""
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    initial, graph, config = await _initial_run_two_tickers(monkeypatch, checkpointer, thread_id)
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_decision(
+        monkeypatch, path="needs_clarification", clarifying_question="Did you mean AAPL or MSFT?"
+    )
+
+    result = await graph.ainvoke({"user_question": "How's the other one doing?"}, config=config)
+
+    assert result["followup_path"] == "needs_clarification"
+    assert result["awaiting_clarification"] is True
+    assert result["clarification_origin"] == "followup"
+    assert result["clarification_question"] == "Did you mean AAPL or MSFT?"
+    assert result["pending_question"] == "How's the other one doing?"
+    assert result["followup_answer"] == "Did you mean AAPL or MSFT?"  # ask_clarification's reply
+    assert set(result["tickers"]) == {"AAPL", "MSFT"}  # session untouched
+    assert call_counts == {}  # no specialist invoked
+    assert initial["final_report"] == result["final_report"]  # untouched
+
+
+async def test_followup_clarification_resolving_to_refresh_only_targets_the_named_ticker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    await _initial_run_two_tickers(monkeypatch, checkpointer, thread_id)
+    graph = build_research_graph(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": thread_id}}
+
+    _mock_followup_decision(
+        monkeypatch, path="needs_clarification", clarifying_question="Did you mean AAPL or MSFT?"
+    )
+    await graph.ainvoke({"user_question": "How's the other one doing?"}, config=config)
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_clarification_decision(
+        monkeypatch, path="refresh", resolves_pending_clarification=True,
+        refresh_tickers=["AAPL"], refresh_agents=["news"],
+    )
+
+    result = await graph.ainvoke({"user_question": "The Apple one"}, config=config)
+
+    assert result["followup_path"] == "refresh"
+    assert result["awaiting_clarification"] is False
+    assert result["clarification_origin"] is None
+    assert call_counts == {"news": 1}  # only the resolved ticker's requested agent ran
+    assert set(result["tickers"]) == {"AAPL", "MSFT"}  # merged, not replaced
+
+
+async def test_followup_clarification_resolving_to_add_ticker_merges_into_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The specific risk a naive fix would have: resolving a follow-up clarification by
+    reusing `apply_router_decision` (fresh-session shape) would REPLACE `state["tickers"]`
+    outright, wiping out the session's existing research. This must merge instead."""
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    await _initial_run_two_tickers(monkeypatch, checkpointer, thread_id)
+    graph = build_research_graph(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": thread_id}}
+
+    _mock_followup_decision(
+        monkeypatch, path="needs_clarification", clarifying_question="Which company did you mean?"
+    )
+    await graph.ainvoke({"user_question": "What about the other tech company?"}, config=config)
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+
+    async def _fake_resolve(ticker: str) -> str:
+        return ticker
+
+    monkeypatch.setattr(followup_mod, "aresolve_ticker", _fake_resolve)
+    _mock_followup_clarification_decision(
+        monkeypatch, path="add_ticker", resolves_pending_clarification=True, new_tickers=["GOOGL"],
+    )
+
+    result = await graph.ainvoke({"user_question": "Google"}, config=config)
+
+    assert result["followup_path"] == "add_ticker"
+    assert set(result["tickers"]) == {"AAPL", "MSFT", "GOOGL"}  # merged, AAPL/MSFT preserved
+    assert call_counts == {"fundamentals": 1, "technical": 1, "news": 1}  # only for the new ticker
+
+
+async def test_followup_clarification_abandoned_for_something_unrelated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    await _initial_run_two_tickers(monkeypatch, checkpointer, thread_id)
+    graph = build_research_graph(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": thread_id}}
+
+    _mock_followup_decision(
+        monkeypatch, path="needs_clarification", clarifying_question="Did you mean AAPL or MSFT?"
+    )
+    await graph.ainvoke({"user_question": "How's the other one doing?"}, config=config)
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_clarification_decision(
+        monkeypatch, path="unrelated", resolves_pending_clarification=False,
+        off_topic_reply="I can only help with the stocks in this session.",
+    )
+
+    result = await graph.ainvoke({"user_question": "What's the weather today?"}, config=config)
+
+    assert result["followup_path"] == "unrelated"
+    assert result["followup_answer"] == "I can only help with the stocks in this session."
+    assert result["awaiting_clarification"] is False
+    assert call_counts == {}
+    assert set(result["tickers"]) == {"AAPL", "MSFT"}  # untouched
+
+
+async def test_followup_clarification_still_ambiguous_asks_again_with_a_fresh_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Abandoning the first clarification for a second, equally vague question must not
+    loop back to the SAME question — it asks a fresh one, exactly like the router-side
+    clarification_response_node does for a fresh session."""
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    await _initial_run_two_tickers(monkeypatch, checkpointer, thread_id)
+    graph = build_research_graph(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": thread_id}}
+
+    _mock_followup_decision(
+        monkeypatch, path="needs_clarification", clarifying_question="Did you mean AAPL or MSFT?"
+    )
+    await graph.ainvoke({"user_question": "How's the other one doing?"}, config=config)
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_clarification_decision(
+        monkeypatch, path="needs_clarification", resolves_pending_clarification=False,
+        clarifying_question="Sorry, still not sure which — AAPL or MSFT?",
+    )
+
+    result = await graph.ainvoke({"user_question": "the one I mentioned earlier"}, config=config)
+
+    assert result["followup_path"] == "needs_clarification"
+    assert result["awaiting_clarification"] is True
+    assert result["clarification_origin"] == "followup"
+    assert result["clarification_question"] == "Sorry, still not sure which — AAPL or MSFT?"
+    assert result["pending_question"] == "the one I mentioned earlier"
+    assert call_counts == {}
+
+
+async def test_followup_clarification_llm_failure_gives_clean_message_and_clears_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    await _initial_run_two_tickers(monkeypatch, checkpointer, thread_id)
+    graph = build_research_graph(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": thread_id}}
+
+    _mock_followup_decision(
+        monkeypatch, path="needs_clarification", clarifying_question="Did you mean AAPL or MSFT?"
+    )
+    await graph.ainvoke({"user_question": "How's the other one doing?"}, config=config)
+
+    async def _raise(prompt: str, schema: type = FollowUpDecision) -> FollowUpDecision:  # noqa: ARG001
+        raise LLMAnalysisError("The analysis service is temporarily unavailable.")
+
+    monkeypatch.setattr(followup_clarification_mod, "run_structured_analysis", _raise)
+
+    result = await graph.ainvoke({"user_question": "AAPL"}, config=config)
+
+    assert result["awaiting_clarification"] is False
+    assert result["clarification_origin"] is None
+    assert result["clarification_question"] is None
+    assert result["pending_question"] is None
+    assert any("temporarily unavailable" in note for note in result["notes"])
