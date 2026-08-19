@@ -77,7 +77,10 @@ async def technical_node(state: ResearchState) -> dict:
     source = Source(
         type="yahoo_finance",
         label=f"{ticker} price history (Yahoo Finance)",
-        url=None,
+        # Same rationale as fundamentals_node's Source — the public quote page, not the
+        # literal internal API endpoint yfinance actually calls, but a real, verifiable
+        # link showing the same underlying price data.
+        url=f"https://finance.yahoo.com/quote/{ticker}",
         as_of=data.as_of,
     )
     findings: list[Finding] = build_findings(ticker, "technical", analysis, source)

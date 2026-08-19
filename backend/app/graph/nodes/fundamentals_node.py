@@ -84,7 +84,10 @@ async def fundamentals_node(state: ResearchState) -> dict:
     source = Source(
         type="yahoo_finance",
         label=f"{ticker} fundamentals (Yahoo Finance)",
-        url=None,
+        # Not literally the page this data was fetched from — yfinance calls Yahoo's
+        # data API directly, not this page — but it's the public page showing the same
+        # figures, and a real link a user can actually verify against beats none.
+        url=f"https://finance.yahoo.com/quote/{ticker}",
         as_of=data.as_of,
     )
     findings: list[Finding] = build_findings(ticker, "fundamentals", analysis, source)

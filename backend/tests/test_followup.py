@@ -113,6 +113,9 @@ def _mock_tools(monkeypatch: pytest.MonkeyPatch, call_counts: dict[str, int] | N
         monkeypatch.setattr(fundamentals_mod, "aget_fundamentals", _counting(FAKE_FUNDAMENTALS, call_counts, "fundamentals"))
         monkeypatch.setattr(technical_mod, "aget_technical_data", _counting(FAKE_TECHNICAL, call_counts, "technical"))
         monkeypatch.setattr(news_mod, "asearch_news", _counting(FAKE_NEWS_RESULTS, call_counts, "news"))
+    # news_node also looks up the company's display name (as a search-query
+    # disambiguation aid) before searching — stub it so tests never hit the network.
+    monkeypatch.setattr(news_mod, "aget_company_name", _async_return(None))
     _mock_analysis(monkeypatch, fundamentals_mod)
     _mock_analysis(monkeypatch, technical_mod)
     _mock_analysis(monkeypatch, news_mod)

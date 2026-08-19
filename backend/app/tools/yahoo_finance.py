@@ -224,6 +224,26 @@ def ticker_exists(ticker: str) -> bool:
     return _has_real_data(info)
 
 
+def get_company_name(ticker: str) -> str | None:
+    """The company's display name, purely as a web-search disambiguation aid: a bare
+    ticker or the short word a company name reduces to (e.g. "TITAN" for Titan Company
+    Limited) collides with unrelated companies that happen to share it — Titan Mining
+    Corp, Titan International, etc. — and a generic news search on the bare word alone
+    can't tell them apart. Reuses `_fetch_info`'s cache, so this is normally free (the
+    same ticker's info was very likely just fetched by fundamentals_node in parallel).
+    Best-effort only: returns None on any failure rather than raising, since a caller
+    using this to build a better search query should just fall back to the bare ticker,
+    not fail outright over a disambiguation hint that didn't pan out.
+    """
+    try:
+        info = _fetch_info(ticker.upper())
+    except Exception:  # noqa: BLE001 - best-effort only, see docstring
+        return None
+    if not _has_real_data(info):
+        return None
+    return info.get("shortName") or info.get("longName")
+
+
 def get_fundamentals(ticker: str) -> FundamentalsData:
     ticker = ticker.upper()
     try:
@@ -302,6 +322,16 @@ async def aticker_exists(ticker: str) -> bool:
     return await asyncio.wait_for(
         asyncio.to_thread(ticker_exists, ticker), timeout=settings.request_timeout_seconds
     )
+
+
+@trace("app.tools.yahoo_finance")
+async def aget_company_name(ticker: str) -> str | None:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(get_company_name, ticker), timeout=settings.request_timeout_seconds
+        )
+    except asyncio.TimeoutError:
+        return None
 
 
 @trace("app.tools.yahoo_finance")

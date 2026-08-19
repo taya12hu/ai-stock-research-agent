@@ -113,6 +113,36 @@ def test_ticker_exists_false_on_persistent_error(monkeypatch: pytest.MonkeyPatch
     assert yahoo_finance.ticker_exists("AAPL") is False
 
 
+def test_get_company_name_returns_short_name_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO))  # noqa: ARG005
+
+    assert yahoo_finance.get_company_name("AAPL") == "Apple Inc."
+
+
+def test_get_company_name_none_for_invalid_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(INVALID_INFO))  # noqa: ARG005
+
+    assert yahoo_finance.get_company_name("ZZZINVALID") is None
+
+
+def test_get_company_name_none_on_fetch_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Best-effort by design (see the function's docstring) — a failure here is a lost
+    search-query disambiguation hint, not something worth raising over."""
+
+    def _raise(ticker: str) -> FakeTicker:  # noqa: ARG001
+        raise ValueError("boom")
+
+    monkeypatch.setattr(yahoo_finance.yf, "Ticker", _raise)
+
+    assert yahoo_finance.get_company_name("AAPL") is None
+
+
+async def test_aget_company_name_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO))  # noqa: ARG005
+
+    assert await yahoo_finance.aget_company_name("AAPL") == "Apple Inc."
+
+
 def test_fetch_info_retries_on_transient_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"count": 0}
 

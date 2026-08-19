@@ -105,6 +105,14 @@ def _mock_synthesis_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(synthesis_comparison_mod, "get_chat_model", fake)
 
 
+@pytest.fixture(autouse=True)
+def _mock_company_name_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    # news_node looks up the company's display name (a search-query disambiguation aid,
+    # see news_node.py) before every search — stub it so no test in this file makes a
+    # live Yahoo Finance call regardless of whether it happens to exercise news_node.
+    monkeypatch.setattr(news_mod, "aget_company_name", _async_return(None))
+
+
 def _new_state() -> Any:
     return new_state(
         tickers=["AAPL"], query_type="single", user_question="Analyze AAPL",
@@ -865,3 +873,89 @@ async def test_multi_ticker_fan_out_merges_every_ticker(monkeypatch: pytest.Monk
     for ticker in ("AAPL", "MSFT"):
         assert set(result["per_ticker_results"][ticker]) == {"fundamentals", "technical", "news"}
     assert "Comparison" in result["final_report"]
+
+
+# --- news_node: ambiguous ticker/company-name disambiguation ------------------------
+
+
+async def test_news_node_query_includes_company_name_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression guard for a real observed bug: a bare ticker/word (e.g. 'TITAN') is
+    ambiguous across unrelated companies (Titan Company Limited vs. Titan Mining Corp
+    vs. Titan International) — the company's actual name narrows the search query
+    itself, on top of the prompt-level check below."""
+    captured: dict[str, str] = {}
+
+    async def _fake_search(query: str, max_results: int = 6) -> list[SearchResult]:  # noqa: ARG001
+        captured["query"] = query
+        return FAKE_NEWS_RESULTS
+
+    monkeypatch.setattr(news_mod, "asearch_news", _fake_search)
+    monkeypatch.setattr(news_mod, "aget_company_name", _async_return("Titan Company Limited"))
+    _mock_analysis(monkeypatch, news_mod)
+
+    await news_mod.news_node({"tickers": ["TITAN.NS"], "session_id": str(uuid.uuid4())})
+
+    assert "Titan Company Limited" in captured["query"]
+    assert "TITAN" in captured["query"]
+
+
+async def test_news_node_query_falls_back_to_bare_ticker_when_name_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, str] = {}
+
+    async def _fake_search(query: str, max_results: int = 6) -> list[SearchResult]:  # noqa: ARG001
+        captured["query"] = query
+        return FAKE_NEWS_RESULTS
+
+    monkeypatch.setattr(news_mod, "asearch_news", _fake_search)
+    monkeypatch.setattr(news_mod, "aget_company_name", _async_return(None))
+    _mock_analysis(monkeypatch, news_mod)
+
+    await news_mod.news_node({"tickers": ["ZZZINVALID"], "session_id": str(uuid.uuid4())})
+
+    assert captured["query"] == "ZZZINVALID stock news"
+
+
+async def test_news_node_prompt_warns_the_llm_about_ambiguous_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The narrower search query helps, but search engines still aren't perfect (see the
+    TITAN case above) — the LLM synthesizing findings must itself be told to verify each
+    article's identity rather than trust whatever the search returned."""
+    captured: dict[str, str] = {}
+
+    async def _fake_analysis(prompt: str, schema: type = NodeAnalysis) -> NewsAnalysis:  # noqa: ARG001
+        captured["prompt"] = prompt
+        return NewsAnalysis(summary="s", findings=[], overall_sentiment="neutral")
+
+    monkeypatch.setattr(news_mod, "asearch_news", _async_return(FAKE_NEWS_RESULTS))
+    monkeypatch.setattr(news_mod, "aget_company_name", _async_return("Titan Company Limited"))
+    monkeypatch.setattr(news_mod, "run_structured_analysis", _fake_analysis)
+
+    await news_mod.news_node({"tickers": ["TITAN.NS"], "session_id": str(uuid.uuid4())})
+
+    assert "Titan Company Limited" in captured["prompt"]
+    assert "different company" in captured["prompt"].lower()
+
+
+# --- fundamentals/technical: verifiable link on an otherwise link-less source ---------
+
+
+async def test_fundamentals_and_technical_findings_link_to_the_yahoo_quote_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fundamentals/technical data comes from yfinance's internal API, not a web page —
+    there's nothing to literally link back to. The public Yahoo Finance quote page shows
+    the same figures and is a real, clickable, verifiable link, which beats leaving these
+    two source types as the only ones with no link at all."""
+    monkeypatch.setattr(fundamentals_mod, "aget_fundamentals", _async_return(FAKE_FUNDAMENTALS))
+    monkeypatch.setattr(technical_mod, "aget_technical_data", _async_return(FAKE_TECHNICAL))
+    monkeypatch.setattr(news_mod, "asearch_news", _async_return(FAKE_NEWS_RESULTS))
+    _mock_analysis(monkeypatch, fundamentals_mod)
+    _mock_analysis(monkeypatch, technical_mod)
+    _mock_analysis(monkeypatch, news_mod)
+
+    result = await build_research_graph().ainvoke(_new_state())
+
+    ticker_results = result["per_ticker_results"]["AAPL"]
+    assert ticker_results["fundamentals"]["findings"][0]["source"]["url"] == "https://finance.yahoo.com/quote/AAPL"
+    assert ticker_results["technical"]["findings"][0]["source"]["url"] == "https://finance.yahoo.com/quote/AAPL"
