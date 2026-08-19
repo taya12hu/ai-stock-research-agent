@@ -34,3 +34,7 @@ TODO.md
 # OS
 .DS_Store
 Thumbs.db
+
+# Dev server logs
+**/.dev-server.log
+.claude/scheduled_tasks.lock
