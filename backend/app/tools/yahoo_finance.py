@@ -1,24 +1,30 @@
-"""Yahoo Finance data access (fundamentals + technical/price data), via `yfinance`.
+"""Market data access: fundamentals via `yfinance`, price history via Twelve Data.
+
+Split provider, not a stylistic choice: Yahoo Finance's unofficial API actively blocks
+requests from cloud/datacenter IPs (confirmed via YFRateLimitError in production on
+Render — see git history), so ticker resolution and technicals were moved onto Twelve
+Data's documented REST API instead. Fundamentals (`get_fundamentals`/`get_company_name`)
+still go through `yfinance` for now and are degraded on cloud hosts until they move to a
+proper provider (Finnhub) too — that failure is caught and surfaced per-section by
+`fundamentals_node`, not fatal to the rest of a report.
 
 Design notes (see ARCHITECTURE.md §6, §10):
 - `yfinance` does not raise for an invalid ticker — it silently returns a near-empty
-  `info` dict (observed: just `{"trailingPegRatio": None}`) and an empty history
-  DataFrame. Validity is therefore checked on the *shape of the returned data*, not on
-  exceptions.
+  `info` dict (observed: just `{"trailingPegRatio": None}`). Validity is therefore
+  checked on the *shape of the returned data*, not on exceptions. Twelve Data returns an
+  explicit `status: "error"` body (still HTTP 200) for a bad symbol, but we normalize
+  that to the same "empty means invalid" contract rather than raising, so callers don't
+  need to special-case which provider a function talks to.
 - Retries only apply to transient network errors, never to "ticker doesn't exist".
-- Every public fetch function is wrapped with a short TTL cache (avoids re-hitting Yahoo
-  repeatedly, e.g. during eval runs) and, on the async side, a hard timeout.
-- Sync core + `asyncio.to_thread` async wrappers, since `yfinance` itself is sync/blocking
-  and agent nodes (a later phase) run in an async LangGraph.
-- A bare symbol can silently collide with the wrong company: `.info` and `.history()`
-  don't always agree on what a bare symbol resolves to (observed: bare "TCS" returns
-  real-looking `.info` while `.history()` reports it delisted — Tata Consultancy
-  Services is actually `TCS.NS`). `resolve_ticker`/`aresolve_ticker` is the strict check
-  used to pick a symbol to research: it requires BOTH endpoints to agree there's a live,
-  tradeable company, and falls back to well-known non-US exchange suffixes on the same
-  symbol when the bare one doesn't hold up — no per-company lookup table, it works by
-  asking Yahoo which variant is actually real. `ticker_exists`/`aticker_exists` remain a
-  lighter existence-only check where that's all a caller needs.
+- Every public fetch function is wrapped with a short TTL cache (avoids re-hitting the
+  provider repeatedly, e.g. during eval runs) and, on the async side, a hard timeout.
+- Sync core + `asyncio.to_thread` async wrappers, since neither underlying HTTP call is
+  async and agent nodes run in an async LangGraph.
+- A bare symbol can silently collide with the wrong company (observed on Yahoo: bare
+  "TCS" resolved to the wrong, delisted company — Tata Consultancy Services is actually
+  "TCS.NS"). `resolve_ticker`/`aresolve_ticker` handles this by requiring real price
+  history for the bare symbol, falling back to well-known non-US exchange suffixes on
+  the same symbol when it doesn't hold up — no per-company lookup table.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pandas as pd
+import requests
 import yfinance as yf
 from cachetools import TTLCache, cached
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -39,6 +46,8 @@ from app.logging_config import get_logger, log_event, trace
 from app.tools.errors import YahooFinanceError
 
 logger = get_logger("app.tools.yahoo_finance")
+
+_TWELVEDATA_BASE_URL = "https://api.twelvedata.com"
 
 _CACHE_TTL_SECONDS = 300
 _info_cache: TTLCache = TTLCache(maxsize=256, ttl=_CACHE_TTL_SECONDS)
@@ -103,10 +112,50 @@ def _fetch_info(ticker: str) -> dict:
     return yf.Ticker(ticker).info or {}
 
 
+# Only "1y" is ever requested in practice (see get_technical_data's default and
+# resolve_ticker below) — this covers that plus a little headroom for the 200-day SMA.
+_TWELVEDATA_OUTPUTSIZE = 260
+
+
 @_retry_network
 @cached(cache=_history_cache)
-def _fetch_history(ticker: str, period: str) -> pd.DataFrame:
-    return yf.Ticker(ticker).history(period=period, interval="1d")
+def _fetch_history(ticker: str, period: str) -> pd.DataFrame:  # noqa: ARG001 - see docstring
+    """`period` is accepted for call-site compatibility but not otherwise used: Twelve
+    Data is asked for a fixed number of daily bars (`_TWELVEDATA_OUTPUTSIZE`) rather than
+    a yfinance-style relative period string, since "1y" is the only value ever passed.
+    """
+    resp = requests.get(
+        f"{_TWELVEDATA_BASE_URL}/time_series",
+        params={
+            "symbol": ticker,
+            "interval": "1day",
+            "outputsize": _TWELVEDATA_OUTPUTSIZE,
+            "apikey": settings.twelvedata_api_key,
+        },
+        timeout=settings.request_timeout_seconds,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+
+    if body.get("status") == "error":
+        # Twelve Data's "bad symbol" signal: HTTP 200 with an error body, mirroring
+        # yfinance's "invalid ticker => empty data" contract rather than raising, per
+        # the module docstring.
+        return pd.DataFrame()
+
+    values = body.get("values") or []
+    if not values:
+        return pd.DataFrame()
+
+    history = pd.DataFrame(values)
+    history["datetime"] = pd.to_datetime(history["datetime"])
+    history = history.set_index("datetime").sort_index()
+    history = history.rename(
+        columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}
+    )
+    for column in ("Open", "High", "Low", "Close", "Volume"):
+        history[column] = history[column].astype(float)
+    return history
 
 
 def _has_real_data(info: dict) -> bool:
@@ -122,30 +171,23 @@ _FALLBACK_SUFFIXES = (".NS", ".BO")
 
 
 def _is_fully_usable(ticker: str) -> bool:
-    """Stricter than `_has_real_data`: requires BOTH `.info` and real price history, since
-    a symbol that only satisfies the former isn't usable by this app's technical agent —
-    and, per the module docstring, disagreement between the two is exactly the signature
-    of a bare symbol matching the wrong (or delisted) company.
+    """A symbol is usable if Twelve Data has real price history for it. (This used to
+    also require yfinance's `.info` to agree — see module docstring on why fundamentals
+    and price history now come from different providers; requiring the Yahoo side here
+    would make every resolution fail on cloud hosts regardless of whether the ticker is
+    actually valid.)
     """
-    try:
-        info = _fetch_info(ticker)
-    except Exception as exc:  # noqa: BLE001 - any fetch failure => not usable
-        logger.warning("yahoo_finance info fetch failed for %r: %r", ticker, exc)
-        return False
-    if not _has_real_data(info):
-        logger.warning("yahoo_finance info fetch returned no usable data for %r: %r", ticker, info)
-        return False
     try:
         history = _fetch_history(ticker, "1y")
     except Exception as exc:  # noqa: BLE001 - any fetch failure => not usable
-        logger.warning("yahoo_finance history fetch failed for %r: %r", ticker, exc)
+        logger.warning("twelvedata history fetch failed for %r: %r", ticker, exc)
         return False
     return history is not None and not history.empty
 
 
 def resolve_ticker(ticker: str) -> str | None:
-    """Returns the symbol that's actually usable on Yahoo Finance for a company the LLM
-    named: the bare symbol as given, tried first, then the same symbol under each
+    """Returns the symbol that Twelve Data actually has price history for, for a company
+    the LLM named: the bare symbol as given, tried first, then the same symbol under each
     fallback suffix. The returned (possibly corrected) symbol is what every downstream
     fetch should key off — not the original input — so a bare-symbol collision is fixed
     once, here, rather than surfacing as a mysterious per-agent failure later. Returns

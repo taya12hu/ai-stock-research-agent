@@ -160,7 +160,7 @@ def test_fetch_info_retries_on_transient_network_error(monkeypatch: pytest.Monke
     assert result.name == "Apple Inc."
 
 
-# --- yahoo_finance: technicals --------------------------------------------------------
+# --- yahoo_finance: technicals (Twelve Data) -------------------------------------------
 
 
 def _synthetic_history(days: int = 300, start_price: float = 100.0) -> pd.DataFrame:
@@ -179,9 +179,41 @@ def _synthetic_history(days: int = 300, start_price: float = 100.0) -> pd.DataFr
     )
 
 
+def _twelvedata_body(history: pd.DataFrame) -> dict:
+    """Twelve Data's time_series response shape, built from a synthetic history frame.
+    Real responses have every numeric field as a string, and order is not guaranteed —
+    `_fetch_history` sorts by datetime itself, so this deliberately emits newest-first
+    to exercise that."""
+    values = [
+        {
+            "datetime": str(index.date()),
+            "open": str(row["Open"]),
+            "high": str(row["High"]),
+            "low": str(row["Low"]),
+            "close": str(row["Close"]),
+            "volume": str(int(row["Volume"])),
+        }
+        for index, row in history.iloc[::-1].iterrows()
+    ]
+    return {"meta": {"symbol": "AAPL"}, "values": values, "status": "ok"}
+
+
+class FakeResponse:
+    def __init__(self, body: dict) -> None:
+        self._body = body
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._body
+
+
 def test_get_technical_data_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     history = _synthetic_history()
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO, history))  # noqa: ARG005
+    monkeypatch.setattr(
+        yahoo_finance.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
+    )
 
     result = yahoo_finance.get_technical_data("AAPL")
 
@@ -205,7 +237,9 @@ def test_get_technical_data_short_history_returns_partial_indicators(
 ) -> None:
     """Fewer than 200 data points: long-window indicators should be None, not crash."""
     history = _synthetic_history(days=10)
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO, history))  # noqa: ARG005
+    monkeypatch.setattr(
+        yahoo_finance.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
+    )
 
     result = yahoo_finance.get_technical_data("AAPL")
 
@@ -217,7 +251,9 @@ def test_get_technical_data_short_history_returns_partial_indicators(
 
 def test_get_technical_data_empty_history_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(INVALID_INFO, pd.DataFrame())  # noqa: ARG005
+        yahoo_finance.requests,
+        "get",
+        lambda *a, **kw: FakeResponse({"status": "error", "message": "no data"}),  # noqa: ARG005
     )
 
     with pytest.raises(YahooFinanceError, match="no price history"):
@@ -225,10 +261,10 @@ def test_get_technical_data_empty_history_raises(monkeypatch: pytest.MonkeyPatch
 
 
 def test_get_technical_data_fetch_failure_message_is_clean(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _raise(ticker: str) -> FakeTicker:  # noqa: ARG001
+    def _raise(*args: object, **kwargs: object) -> FakeResponse:
         raise ValueError("obscure internal parsing failure with a stack-trace-like body")
 
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", _raise)
+    monkeypatch.setattr(yahoo_finance.requests, "get", _raise)
 
     with pytest.raises(YahooFinanceError) as exc_info:
         yahoo_finance.get_technical_data("AAPL")
@@ -237,12 +273,14 @@ def test_get_technical_data_fetch_failure_message_is_clean(monkeypatch: pytest.M
     assert "stack-trace-like" not in str(exc_info.value)
 
 
-# --- yahoo_finance: ticker resolution / exchange-suffix fallback ----------------------
+# --- yahoo_finance: ticker resolution / exchange-suffix fallback (Twelve Data) --------
 
 
 def test_resolve_ticker_returns_bare_symbol_when_fully_usable(monkeypatch: pytest.MonkeyPatch) -> None:
     history = _synthetic_history()
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO, history))  # noqa: ARG005
+    monkeypatch.setattr(
+        yahoo_finance.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
+    )
 
     assert yahoo_finance.resolve_ticker("aapl") == "AAPL"
 
@@ -250,30 +288,39 @@ def test_resolve_ticker_returns_bare_symbol_when_fully_usable(monkeypatch: pytes
 def test_resolve_ticker_falls_back_to_ns_suffix_when_bare_symbol_is_delisted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression guard for the real observed collision: bare 'TCS' returns real-looking
-    `.info` (so `_has_real_data`/`ticker_exists` alone would call it valid) but empty
-    price history — the wrong or delisted company. 'TCS.NS' is the actual usable
-    listing. No name-to-suffix lookup table involved: both variants are genuinely
-    probed against (fake) Yahoo Finance."""
+    """Regression guard for the real observed collision: bare 'TCS' resolves to the
+    wrong (or delisted) company on the bare symbol, and only 'TCS.NS' has real price
+    history. No name-to-suffix lookup table involved: both variants are genuinely
+    probed against (fake) Twelve Data, keyed by the request's `symbol` param."""
     history = _synthetic_history()
-    fakes = {
-        "TCS": FakeTicker({"symbol": "TCS", "shortName": "Some Other Co"}, pd.DataFrame()),
-        "TCS.NS": FakeTicker({"symbol": "TCS.NS", "shortName": "Tata Consultancy Services"}, history),
+    bodies = {
+        "TCS": {"status": "error", "message": "symbol not found"},
+        "TCS.NS": _twelvedata_body(history),
     }
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: fakes[ticker])
+
+    def _fake_get(url: str, params: dict, **kwargs: object) -> FakeResponse:  # noqa: ARG001
+        return FakeResponse(bodies[params["symbol"]])
+
+    monkeypatch.setattr(yahoo_finance.requests, "get", _fake_get)
 
     assert yahoo_finance.resolve_ticker("TCS") == "TCS.NS"
 
 
 def test_resolve_ticker_returns_none_when_no_variant_is_usable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(INVALID_INFO, pd.DataFrame()))  # noqa: ARG005
+    monkeypatch.setattr(
+        yahoo_finance.requests,
+        "get",
+        lambda *a, **kw: FakeResponse({"status": "error", "message": "not found"}),  # noqa: ARG005
+    )
 
     assert yahoo_finance.resolve_ticker("ZZZINVALID") is None
 
 
 async def test_aresolve_ticker_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     history = _synthetic_history()
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO, history))  # noqa: ARG005
+    monkeypatch.setattr(
+        yahoo_finance.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
+    )
 
     assert await yahoo_finance.aresolve_ticker("AAPL") == "AAPL"
 

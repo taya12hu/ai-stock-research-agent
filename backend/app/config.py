@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
 
+    finnhub_api_key: str = ""
+    twelvedata_api_key: str = ""
+
     max_tickers: int = 5
     request_timeout_seconds: int = 20
 
