@@ -34,12 +34,14 @@ interface VerdictMatch {
 }
 
 const PLAIN_VERDICT = /^Verdict:\s*(Buy|Sell|Hold)\b[\s.:—-]*(.*)$/i;
-// Ticker length is generous (up to 15 chars) rather than tuned to short US symbols —
-// NSE/BSE tickers commonly carry an exchange suffix on an already-long base symbol
-// (e.g. "HDFCBANK.NS" is 11 chars), and a real length overrun here doesn't silently
-// mis-render, it just falls through as plain unstyled text (see PER_TICKER_VERDICT's
-// only caller) — better to comfortably cover real tickers than clip them.
-const PER_TICKER_VERDICT = /^([A-Z][A-Z0-9.]{0,14}):\s*(Buy|Sell|Hold)\b[\s.:—-]*(.*)$/;
+// No upper bound on ticker length: what actually rules out a false positive is the
+// character class (all-caps/digits/dots only — no spaces, so it can never match a
+// stray phrase) plus the immediate ": Buy/Sell/Hold" right after it, not a length
+// number. A cap here doesn't add real protection — it was previously set to 10 chars
+// (tuned to short US symbols) and silently broke on "HDFCBANK.NS" (11 chars); it would
+// break again on the next longer one. Uncapped is the actually-correct fix, not a
+// bigger guess.
+const PER_TICKER_VERDICT = /^([A-Z][A-Z0-9.]+):\s*(Buy|Sell|Hold)\b[\s.:—-]*(.*)$/;
 
 function parseVerdictLine(text: string): VerdictMatch | null {
   const trimmed = text.trim();
