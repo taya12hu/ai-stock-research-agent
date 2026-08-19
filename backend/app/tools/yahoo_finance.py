@@ -134,6 +134,11 @@ def _fetch_history(ticker: str, period: str) -> pd.DataFrame:  # noqa: ARG001 - 
         },
         timeout=settings.request_timeout_seconds,
     )
+    if resp.status_code == 404:
+        # A permanently invalid symbol, not a transient failure — retrying this would
+        # only waste attempts against Twelve Data's tight free-tier rate limit (8
+        # requests/minute) for a request that will never succeed.
+        return pd.DataFrame()
     resp.raise_for_status()
     body = resp.json()
 

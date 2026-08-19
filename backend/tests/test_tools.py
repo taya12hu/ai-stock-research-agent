@@ -199,8 +199,9 @@ def _twelvedata_body(history: pd.DataFrame) -> dict:
 
 
 class FakeResponse:
-    def __init__(self, body: dict) -> None:
+    def __init__(self, body: dict, status_code: int = 200) -> None:
         self._body = body
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
         return None
@@ -258,6 +259,23 @@ def test_get_technical_data_empty_history_raises(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(YahooFinanceError, match="no price history"):
         yahoo_finance.get_technical_data("ZZZINVALID")
+
+
+def test_fetch_history_404_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 404 means the symbol genuinely doesn't exist, not a transient failure —
+    retrying it would only burn through Twelve Data's tight free-tier rate limit
+    (8 requests/minute) on a request that can never succeed."""
+    calls = {"count": 0}
+
+    def _fake_get(*args: object, **kwargs: object) -> FakeResponse:
+        calls["count"] += 1
+        return FakeResponse({}, status_code=404)
+
+    monkeypatch.setattr(yahoo_finance.requests, "get", _fake_get)
+
+    assert yahoo_finance.resolve_ticker("ZZZINVALID") is None
+    # 1 request per candidate (bare + 2 suffixes), no retries on any of them.
+    assert calls["count"] == 3
 
 
 def test_get_technical_data_fetch_failure_message_is_clean(monkeypatch: pytest.MonkeyPatch) -> None:
