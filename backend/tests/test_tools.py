@@ -20,57 +20,65 @@ def _clear_caches() -> None:
     web_search._search_cache.clear()
 
 
-# --- yahoo_finance: fundamentals -----------------------------------------------------
+# --- yahoo_finance: fundamentals (Finnhub) ---------------------------------------------
 
 
-class FakeTicker:
-    def __init__(self, info: dict, history: pd.DataFrame | None = None) -> None:
-        self.info = info
-        self._history = history if history is not None else pd.DataFrame()
-
-    def history(self, period: str, interval: str) -> pd.DataFrame:  # noqa: ARG002
-        return self._history
-
-
-VALID_INFO = {
-    "symbol": "AAPL",
-    "shortName": "Apple Inc.",
-    "sector": "Technology",
-    "industry": "Consumer Electronics",
-    "marketCap": 4_400_000_000_000,
-    "trailingPE": 34.5,
-    "forwardPE": 30.1,
-    "priceToBook": 55.2,
-    "dividendYield": 0.35,
-    "profitMargins": 0.276,
-    "revenueGrowth": 0.08,
-    "earningsGrowth": 0.1,
-    "returnOnEquity": 1.5,
-    "totalDebt": 100_000_000_000,
-    "totalCash": 60_000_000_000,
-    "currentPrice": 302.4,
-    "recommendationKey": "buy",
+FINNHUB_VALID_PROFILE = {
+    "ticker": "AAPL",
+    "name": "Apple Inc.",
+    "finnhubIndustry": "Technology",
+    "marketCapitalization": 4_400_000.0,  # millions, per Finnhub's convention
+}
+FINNHUB_VALID_QUOTE = {"c": 302.4}
+FINNHUB_VALID_METRIC = {
+    "metric": {
+        "peTTM": 34.5,
+        "pb": 55.2,
+        "dividendYieldIndicatedAnnual": 35.0,  # -> 0.35 after /100 normalization
+        "netProfitMarginTTM": 27.6,  # -> 0.276
+        "revenueGrowthTTMYoy": 8.0,  # -> 0.08
+        "epsGrowthTTMYoy": 10.0,  # -> 0.1
+        "roeTTM": 150.0,  # -> 1.5
+    }
 }
 
-# Observed real yfinance behavior for an invalid ticker: a near-empty dict, not an
-# exception and not an empty dict.
-INVALID_INFO = {"trailingPegRatio": None}
+# Observed real Finnhub behavior for an invalid ticker: HTTP 200 with an empty body,
+# not an exception (confirmed by live testing — see git history).
+FINNHUB_INVALID_PROFILE: dict = {}
+FINNHUB_INVALID_QUOTE: dict = {}
+FINNHUB_INVALID_METRIC: dict = {"metric": {}}
+
+
+def _fake_finnhub_get(valid: bool):
+    def _get(path: str, params: dict) -> dict:  # noqa: ARG001
+        if path == "/stock/profile2":
+            return FINNHUB_VALID_PROFILE if valid else FINNHUB_INVALID_PROFILE
+        if path == "/quote":
+            return FINNHUB_VALID_QUOTE if valid else FINNHUB_INVALID_QUOTE
+        if path == "/stock/metric":
+            return FINNHUB_VALID_METRIC if valid else FINNHUB_INVALID_METRIC
+        raise AssertionError(f"unexpected Finnhub path {path!r}")
+
+    return _get
 
 
 def test_get_fundamentals_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO))  # noqa: ARG005
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=True))
 
     result = yahoo_finance.get_fundamentals("aapl")
 
     assert result.ticker == "AAPL"
     assert result.name == "Apple Inc."
-    assert result.sector == "Technology"
+    assert result.industry == "Technology"
+    assert result.market_cap == 4_400_000_000_000
+    assert result.trailing_pe == 34.5
+    assert result.dividend_yield == 0.35
+    assert result.profit_margin == 0.276
     assert result.current_price == 302.4
-    assert result.recommendation == "buy"
 
 
 def test_get_fundamentals_invalid_ticker_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(INVALID_INFO))  # noqa: ARG005
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=False))
 
     with pytest.raises(YahooFinanceError, match="no fundamentals data"):
         yahoo_finance.get_fundamentals("ZZZINVALID")
@@ -80,10 +88,10 @@ def test_get_fundamentals_fetch_failure_message_is_clean(monkeypatch: pytest.Mon
     """The raised message is user-facing (surfaces in a failed AgentResult) and must
     never leak the raw underlying exception text — only a fixed, friendly message."""
 
-    def _raise(ticker: str) -> FakeTicker:  # noqa: ARG001
+    def _raise(path: str, params: dict) -> dict:  # noqa: ARG001
         raise ValueError("obscure internal parsing failure with a stack-trace-like body")
 
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", _raise)
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _raise)
 
     with pytest.raises(YahooFinanceError) as exc_info:
         yahoo_finance.get_fundamentals("AAPL")
@@ -93,34 +101,34 @@ def test_get_fundamentals_fetch_failure_message_is_clean(monkeypatch: pytest.Mon
 
 
 def test_ticker_exists_true_for_valid(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO))  # noqa: ARG005
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=True))
 
     assert yahoo_finance.ticker_exists("AAPL") is True
 
 
 def test_ticker_exists_false_for_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(INVALID_INFO))  # noqa: ARG005
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=False))
 
     assert yahoo_finance.ticker_exists("ZZZINVALID") is False
 
 
 def test_ticker_exists_false_on_persistent_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _raise(ticker: str) -> FakeTicker:  # noqa: ARG001
+    def _raise(path: str, params: dict) -> dict:  # noqa: ARG001
         raise ValueError("boom")
 
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", _raise)
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _raise)
 
     assert yahoo_finance.ticker_exists("AAPL") is False
 
 
 def test_get_company_name_returns_short_name_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO))  # noqa: ARG005
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=True))
 
     assert yahoo_finance.get_company_name("AAPL") == "Apple Inc."
 
 
 def test_get_company_name_none_for_invalid_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(INVALID_INFO))  # noqa: ARG005
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=False))
 
     assert yahoo_finance.get_company_name("ZZZINVALID") is None
 
@@ -129,34 +137,35 @@ def test_get_company_name_none_on_fetch_failure(monkeypatch: pytest.MonkeyPatch)
     """Best-effort by design (see the function's docstring) — a failure here is a lost
     search-query disambiguation hint, not something worth raising over."""
 
-    def _raise(ticker: str) -> FakeTicker:  # noqa: ARG001
+    def _raise(path: str, params: dict) -> dict:  # noqa: ARG001
         raise ValueError("boom")
 
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", _raise)
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _raise)
 
     assert yahoo_finance.get_company_name("AAPL") is None
 
 
 async def test_aget_company_name_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO))  # noqa: ARG005
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=True))
 
     assert await yahoo_finance.aget_company_name("AAPL") == "Apple Inc."
 
 
 def test_fetch_info_retries_on_transient_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"count": 0}
+    succeed = _fake_finnhub_get(valid=True)
 
-    def _flaky(ticker: str) -> FakeTicker:  # noqa: ARG001
+    def _flaky(path: str, params: dict) -> dict:
         calls["count"] += 1
         if calls["count"] < 3:
             raise ConnectionError("transient")
-        return FakeTicker(VALID_INFO)
+        return succeed(path, params)
 
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", _flaky)
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _flaky)
 
     result = yahoo_finance.get_fundamentals("AAPL")
 
-    assert calls["count"] == 3
+    assert calls["count"] >= 3
     assert result.name == "Apple Inc."
 
 
@@ -347,7 +356,7 @@ async def test_aresolve_ticker_happy_path(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 async def test_aget_fundamentals_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO))  # noqa: ARG005
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=True))
 
     result = await yahoo_finance.aget_fundamentals("AAPL")
 
@@ -355,7 +364,7 @@ async def test_aget_fundamentals_happy_path(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 async def test_aget_fundamentals_propagates_tool_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(INVALID_INFO))  # noqa: ARG005
+    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=False))
 
     with pytest.raises(YahooFinanceError):
         await yahoo_finance.aget_fundamentals("ZZZINVALID")

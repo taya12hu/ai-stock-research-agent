@@ -943,10 +943,10 @@ async def test_news_node_prompt_warns_the_llm_about_ambiguous_matches(monkeypatc
 async def test_fundamentals_and_technical_findings_link_to_the_yahoo_quote_page(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """fundamentals/technical data comes from yfinance's internal API, not a web page —
-    there's nothing to literally link back to. The public Yahoo Finance quote page shows
-    the same figures and is a real, clickable, verifiable link, which beats leaving these
-    two source types as the only ones with no link at all."""
+    """fundamentals/technical data comes from Finnhub/Twelve Data's token-authed APIs,
+    not a web page — there's nothing to literally link back to. The public Yahoo Finance
+    quote page shows the same figures and is a real, clickable, verifiable link, which
+    beats leaving these two source types as the only ones with no link at all."""
     monkeypatch.setattr(fundamentals_mod, "aget_fundamentals", _async_return(FAKE_FUNDAMENTALS))
     monkeypatch.setattr(technical_mod, "aget_technical_data", _async_return(FAKE_TECHNICAL))
     monkeypatch.setattr(news_mod, "asearch_news", _async_return(FAKE_NEWS_RESULTS))

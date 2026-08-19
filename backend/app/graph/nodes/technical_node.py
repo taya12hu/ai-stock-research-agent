@@ -76,10 +76,10 @@ async def technical_node(state: ResearchState) -> dict:
 
     source = Source(
         type="yahoo_finance",
-        label=f"{ticker} price history (Yahoo Finance)",
+        label=f"{ticker} price history (Twelve Data)",
         # Same rationale as fundamentals_node's Source — the public quote page, not the
-        # literal internal API endpoint yfinance actually calls, but a real, verifiable
-        # link showing the same underlying price data.
+        # literal token-authed API endpoint (Twelve Data) actually called, but a real,
+        # verifiable link showing the same underlying price data.
         url=f"https://finance.yahoo.com/quote/{ticker}",
         as_of=data.as_of,
     )

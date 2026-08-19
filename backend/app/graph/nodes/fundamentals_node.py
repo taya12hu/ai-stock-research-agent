@@ -83,10 +83,11 @@ async def fundamentals_node(state: ResearchState) -> dict:
 
     source = Source(
         type="yahoo_finance",
-        label=f"{ticker} fundamentals (Yahoo Finance)",
-        # Not literally the page this data was fetched from — yfinance calls Yahoo's
-        # data API directly, not this page — but it's the public page showing the same
-        # figures, and a real link a user can actually verify against beats none.
+        label=f"{ticker} fundamentals (Finnhub)",
+        # Not literally the page this data was fetched from — it's fetched from
+        # Finnhub's token-authed API, which has no public per-ticker page to link to —
+        # but Yahoo Finance's public quote page covers the same categories of figures
+        # and is a real link a user can actually click through and verify against.
         url=f"https://finance.yahoo.com/quote/{ticker}",
         as_of=data.as_of,
     )

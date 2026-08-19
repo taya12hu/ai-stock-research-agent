@@ -1,21 +1,23 @@
-"""Market data access: fundamentals via `yfinance`, price history via Twelve Data.
+"""Market data access: fundamentals via Finnhub, price history via Twelve Data.
 
-Split provider, not a stylistic choice: Yahoo Finance's unofficial API actively blocks
-requests from cloud/datacenter IPs (confirmed via YFRateLimitError in production on
-Render — see git history), so ticker resolution and technicals were moved onto Twelve
-Data's documented REST API instead. Fundamentals (`get_fundamentals`/`get_company_name`)
-still go through `yfinance` for now and are degraded on cloud hosts until they move to a
-proper provider (Finnhub) too — that failure is caught and surfaced per-section by
-`fundamentals_node`, not fatal to the rest of a report.
+Neither provider is Yahoo/`yfinance` anymore, despite the filename (kept for now to
+limit the diff — see git history for the full story). Yahoo Finance's unofficial API
+actively blocks requests from cloud/datacenter IPs (confirmed via YFRateLimitError in
+production on Render), badly enough that retries didn't fix it. Ticker resolution and
+technicals moved to Twelve Data first; fundamentals (`get_fundamentals`,
+`get_company_name`, `ticker_exists`) followed onto Finnhub once a key was available.
+`yfinance` itself is no longer imported.
 
-Design notes (see ARCHITECTURE.md §6, §10):
-- `yfinance` does not raise for an invalid ticker — it silently returns a near-empty
-  `info` dict (observed: just `{"trailingPegRatio": None}`). Validity is therefore
-  checked on the *shape of the returned data*, not on exceptions. Twelve Data returns an
-  explicit `status: "error"` body (still HTTP 200) for a bad symbol, but we normalize
-  that to the same "empty means invalid" contract rather than raising, so callers don't
-  need to special-case which provider a function talks to.
-- Retries only apply to transient network errors, never to "ticker doesn't exist".
+Design notes (see ARCHITECTURE.md §6, §10 — written for the yfinance era, now stale):
+- Both providers signal "invalid ticker" the same way yfinance did: HTTP 200 with an
+  empty/near-empty body, not an exception (confirmed live: Finnhub's `/stock/profile2`
+  returns `{}` for a bad symbol; Twelve Data returns `status: "error"`). Validity is
+  therefore checked on the *shape of the returned data*, not on exceptions, and that
+  contract is normalized across both providers so callers don't need to special-case
+  which one a function talks to.
+- Retries only apply to transient network errors (and Twelve Data rate limits), never
+  to "ticker doesn't exist" — a 404 there is permanent, not transient, so retrying it
+  would only burn through the free-tier rate limit for nothing.
 - Every public fetch function is wrapped with a short TTL cache (avoids re-hitting the
   provider repeatedly, e.g. during eval runs) and, on the async side, a hard timeout.
 - Sync core + `asyncio.to_thread` async wrappers, since neither underlying HTTP call is
@@ -25,6 +27,10 @@ Design notes (see ARCHITECTURE.md §6, §10):
   "TCS.NS"). `resolve_ticker`/`aresolve_ticker` handles this by requiring real price
   history for the bare symbol, falling back to well-known non-US exchange suffixes on
   the same symbol when it doesn't hold up — no per-company lookup table.
+- Finnhub's basic-financials numbers (margins, growth, yield, ROE) are percentages
+  (e.g. `netProfitMarginTTM: 27.62` means 27.6%); they're divided by 100 here to match
+  the decimal-fraction convention `FundamentalsData` already used under yfinance (e.g.
+  `profitMargins: 0.276`), so nothing downstream needs to know the provider changed.
 """
 
 from __future__ import annotations
@@ -36,10 +42,8 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import requests
-import yfinance as yf
 from cachetools import TTLCache, cached
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
-from yfinance.exceptions import YFRateLimitError
 
 from app.config import settings
 from app.logging_config import get_logger, log_event, trace
@@ -48,17 +52,16 @@ from app.tools.errors import YahooFinanceError
 logger = get_logger("app.tools.yahoo_finance")
 
 _TWELVEDATA_BASE_URL = "https://api.twelvedata.com"
+_FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 
 _CACHE_TTL_SECONDS = 300
 _info_cache: TTLCache = TTLCache(maxsize=256, ttl=_CACHE_TTL_SECONDS)
 _history_cache: TTLCache = TTLCache(maxsize=256, ttl=_CACHE_TTL_SECONDS)
 
-# yfinance raises plain requests/urllib errors on real network trouble; it does NOT
-# raise these for an invalid ticker (see module docstring), so retrying on them is safe.
-# YFRateLimitError is included too: cloud/datacenter IPs (Render, AWS, GCP, ...) get
-# throttled by Yahoo far more aggressively than residential ones, so a longer backoff
-# here is the difference between a real request succeeding and failing outright.
-_RETRYABLE = (ConnectionError, TimeoutError, OSError, YFRateLimitError)
+# `requests`' exceptions (ConnectionError, Timeout, HTTPError, ...) all subclass OSError,
+# which covers network trouble and non-2xx responses (429s included) alike — a real 404
+# is short-circuited separately in `_fetch_history` rather than being retried here.
+_RETRYABLE = (ConnectionError, TimeoutError, OSError)
 
 _retry_network = retry(
     stop=stop_after_attempt(4),
@@ -106,10 +109,28 @@ class TechnicalData:
     as_of: str
 
 
+def _finnhub_get(path: str, params: dict) -> dict:
+    resp = requests.get(
+        f"{_FINNHUB_BASE_URL}{path}",
+        params={**params, "token": settings.finnhub_api_key},
+        timeout=settings.request_timeout_seconds,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 @_retry_network
 @cached(cache=_info_cache)
 def _fetch_info(ticker: str) -> dict:
-    return yf.Ticker(ticker).info or {}
+    """One combined, cached fetch of everything `get_fundamentals`/`get_company_name`/
+    `ticker_exists` need — profile, quote, and basic-financials metrics each cost a
+    separate Finnhub call, but they're always needed together in practice, and bundling
+    them means all three callers share one cache entry per ticker instead of three."""
+    return {
+        "profile": _finnhub_get("/stock/profile2", {"symbol": ticker}),
+        "quote": _finnhub_get("/quote", {"symbol": ticker}),
+        "metric": _finnhub_get("/stock/metric", {"symbol": ticker, "metric": "all"}).get("metric") or {},
+    }
 
 
 # Only "1y" is ever requested in practice (see get_technical_data's default and
@@ -164,9 +185,8 @@ def _fetch_history(ticker: str, period: str) -> pd.DataFrame:  # noqa: ARG001 - 
 
 
 def _has_real_data(info: dict) -> bool:
-    return bool(info) and bool(
-        info.get("symbol") or info.get("shortName") or info.get("regularMarketPrice")
-    )
+    profile = info.get("profile") or {}
+    return bool(profile.get("ticker") or profile.get("name"))
 
 
 # Non-US exchange suffixes to try on the same bare symbol when it doesn't hold up under
@@ -295,7 +315,15 @@ def get_company_name(ticker: str) -> str | None:
         return None
     if not _has_real_data(info):
         return None
-    return info.get("shortName") or info.get("longName")
+    return info["profile"].get("name")
+
+
+def _pct_to_fraction(value: float | None) -> float | None:
+    """Finnhub reports margins/growth/yield/ROE as percentages (27.62 meaning 27.6%);
+    `FundamentalsData` uses decimal fractions (0.276), the convention its yfinance-era
+    fields already had — normalized here so nothing downstream has to know or care
+    which provider a field came from."""
+    return value / 100 if value is not None else None
 
 
 def get_fundamentals(ticker: str) -> FundamentalsData:
@@ -312,24 +340,27 @@ def get_fundamentals(ticker: str) -> FundamentalsData:
     if not _has_real_data(info):
         raise YahooFinanceError(f"no fundamentals data for {ticker} (ticker may be invalid)")
 
+    profile, quote, metric = info["profile"], info["quote"], info["metric"]
+    market_cap_millions = profile.get("marketCapitalization")
+
     return FundamentalsData(
         ticker=ticker,
-        name=info.get("shortName") or info.get("longName"),
-        sector=info.get("sector"),
-        industry=info.get("industry"),
-        market_cap=info.get("marketCap"),
-        trailing_pe=info.get("trailingPE"),
-        forward_pe=info.get("forwardPE"),
-        price_to_book=info.get("priceToBook"),
-        dividend_yield=info.get("dividendYield"),
-        profit_margin=info.get("profitMargins"),
-        revenue_growth=info.get("revenueGrowth"),
-        earnings_growth=info.get("earningsGrowth"),
-        return_on_equity=info.get("returnOnEquity"),
-        total_debt=info.get("totalDebt"),
-        total_cash=info.get("totalCash"),
-        current_price=info.get("currentPrice") or info.get("regularMarketPrice"),
-        recommendation=info.get("recommendationKey"),
+        name=profile.get("name"),
+        sector=None,  # not exposed on Finnhub's free tier - only the industry below
+        industry=profile.get("finnhubIndustry"),
+        market_cap=market_cap_millions * 1_000_000 if market_cap_millions is not None else None,
+        trailing_pe=metric.get("peTTM"),
+        forward_pe=None,  # requires the (paid) analyst-estimates endpoint
+        price_to_book=metric.get("pb"),
+        dividend_yield=_pct_to_fraction(metric.get("dividendYieldIndicatedAnnual")),
+        profit_margin=_pct_to_fraction(metric.get("netProfitMarginTTM")),
+        revenue_growth=_pct_to_fraction(metric.get("revenueGrowthTTMYoy")),
+        earnings_growth=_pct_to_fraction(metric.get("epsGrowthTTMYoy")),
+        return_on_equity=_pct_to_fraction(metric.get("roeTTM")),
+        total_debt=None,  # only a debt/equity ratio is available, not an absolute figure
+        total_cash=None,
+        current_price=quote.get("c"),
+        recommendation=None,  # requires a separate (rate-limited) recommendation-trends call
         as_of=datetime.now(timezone.utc).isoformat(),
     )
 

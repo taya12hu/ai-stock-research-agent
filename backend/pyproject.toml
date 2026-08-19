@@ -9,7 +9,6 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.5",
     "python-dotenv>=1.0",
-    "yfinance>=0.2.48",
     "requests>=2.32",
     "ddgs>=9.0",
     "pandas>=2.2",
