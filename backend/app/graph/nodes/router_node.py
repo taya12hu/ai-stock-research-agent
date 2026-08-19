@@ -280,8 +280,10 @@ async def resolve_tickers(
     valid_tickers: list[str] = []
     for ticker in deduped:
         resolved = await aresolve_ticker(ticker)
-        if resolved:
-            valid_tickers.append(resolved)
+        if resolved.symbol:
+            valid_tickers.append(resolved.symbol)
+        elif resolved.unsupported_market:
+            notes.append(f"'{ticker}' isn't a US-listed stock, so it isn't currently supported.")
         else:
             notes.append(f"'{ticker}' could not be found and was skipped.")
     valid_tickers = list(dict.fromkeys(valid_tickers))  # a bare symbol and its resolved

@@ -326,8 +326,10 @@ async def _plan_add_ticker(state: ResearchState, decision: FollowUpDecision) -> 
     valid_new: list[str] = []
     for ticker in candidates:
         resolved = await aresolve_ticker(ticker)
-        if resolved:
-            valid_new.append(resolved)
+        if resolved.symbol:
+            valid_new.append(resolved.symbol)
+        elif resolved.unsupported_market:
+            notes.append(f"'{ticker}' isn't a US-listed stock, so it isn't currently supported.")
         else:
             notes.append(f"'{ticker}' could not be found and was skipped.")
 

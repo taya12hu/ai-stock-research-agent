@@ -39,6 +39,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 import pandas as pd
 import requests
@@ -138,6 +139,23 @@ def _fetch_info(ticker: str) -> dict:
 _TWELVEDATA_OUTPUTSIZE = 260
 
 
+class _UnsupportedMarketError(Exception):
+    """Raised internally when Twelve Data recognizes a symbol but gates it behind a
+    paid plan — every case observed so far is a non-US listing (Twelve Data's free tier
+    is US-market-only). Kept private to this module: `resolve_ticker` translates it into
+    `ResolvedTicker.unsupported_market` rather than letting the distinction (or Twelve
+    Data's name) leak to callers or, eventually, into a user-facing message. The product
+    boundary we tell users about is our own ("we support US-listed stocks"), not any one
+    vendor's pricing tiers — see git history for the discussion that led here.
+    """
+
+
+# Twelve Data's stable substring for "this symbol exists but needs a higher plan" (see
+# _UnsupportedMarketError) — distinct from its generic invalid-symbol 404, which doesn't
+# contain this phrase. Confirmed against the live API, not guessed.
+_PLAN_GATED_MARKER = "available starting with"
+
+
 @_retry_network
 @cached(cache=_history_cache)
 def _fetch_history(ticker: str, period: str) -> pd.DataFrame:  # noqa: ARG001 - see docstring
@@ -156,9 +174,11 @@ def _fetch_history(ticker: str, period: str) -> pd.DataFrame:  # noqa: ARG001 - 
         timeout=settings.request_timeout_seconds,
     )
     if resp.status_code == 404:
-        # A permanently invalid symbol, not a transient failure — retrying this would
-        # only waste attempts against Twelve Data's tight free-tier rate limit (8
-        # requests/minute) for a request that will never succeed.
+        if _PLAN_GATED_MARKER in resp.text:
+            raise _UnsupportedMarketError(ticker)
+        # Otherwise a permanently invalid symbol, not a transient failure — retrying
+        # this would only waste attempts against Twelve Data's tight free-tier rate
+        # limit (8 requests/minute) for a request that will never succeed.
         return pd.DataFrame()
     resp.raise_for_status()
     body = resp.json()
@@ -200,29 +220,49 @@ def _is_fully_usable(ticker: str) -> bool:
     also require yfinance's `.info` to agree — see module docstring on why fundamentals
     and price history now come from different providers; requiring the Yahoo side here
     would make every resolution fail on cloud hosts regardless of whether the ticker is
-    actually valid.)
+    actually valid.) `_UnsupportedMarketError` is deliberately not caught here — it's not
+    "not usable," it's a different outcome the caller needs to see, not a bool the caller
+    can't act on.
     """
     try:
         history = _fetch_history(ticker, "1y")
-    except Exception as exc:  # noqa: BLE001 - any fetch failure => not usable
+    except _UnsupportedMarketError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any other fetch failure => not usable
         logger.warning("twelvedata history fetch failed for %r: %r", ticker, exc)
         return False
     return history is not None and not history.empty
 
 
-def resolve_ticker(ticker: str) -> str | None:
+class ResolvedTicker(NamedTuple):
+    """`resolve_ticker`'s result. `symbol` is the usable symbol on success, `None` on
+    failure. When it failed specifically because the ticker's market isn't covered by
+    the current data plan (not because the company doesn't exist), `unsupported_market`
+    is set — so a caller can tell the user the real reason ("we only support US-listed
+    stocks") instead of the misleading generic "could not be found," which reads as
+    "this company doesn't exist" for a real, well-known company.
+    """
+
+    symbol: str | None
+    unsupported_market: bool = False
+
+
+def resolve_ticker(ticker: str) -> ResolvedTicker:
     """Returns the symbol that Twelve Data actually has price history for, for a company
     the LLM named: the bare symbol as given, tried first, then the same symbol under each
     fallback suffix. The returned (possibly corrected) symbol is what every downstream
     fetch should key off — not the original input — so a bare-symbol collision is fixed
-    once, here, rather than surfacing as a mysterious per-agent failure later. Returns
-    None if nothing usable was found under any variant.
+    once, here, rather than surfacing as a mysterious per-agent failure later.
     """
     ticker = ticker.strip().upper()
+    saw_unsupported_market = False
     for candidate in (ticker, *(f"{ticker}{suffix}" for suffix in _FALLBACK_SUFFIXES)):
-        if _is_fully_usable(candidate):
-            return candidate
-    return None
+        try:
+            if _is_fully_usable(candidate):
+                return ResolvedTicker(candidate)
+        except _UnsupportedMarketError:
+            saw_unsupported_market = True
+    return ResolvedTicker(None, unsupported_market=saw_unsupported_market)
 
 
 # --- technical indicator math -------------------------------------------------------
@@ -420,9 +460,9 @@ async def aget_company_name(ticker: str) -> str | None:
 
 
 @trace("app.tools.yahoo_finance")
-async def aresolve_ticker(ticker: str) -> str | None:
-    # Tries up to 3 symbol variants sequentially (bare + 2 suffixes), each requiring 2
-    # Yahoo round-trips — a longer timeout than a single fetch is deliberate here.
+async def aresolve_ticker(ticker: str) -> ResolvedTicker:
+    # Tries up to 3 symbol variants sequentially (bare + 2 suffixes) — a longer timeout
+    # than a single fetch is deliberate here.
     return await asyncio.wait_for(
         asyncio.to_thread(resolve_ticker, ticker), timeout=settings.request_timeout_seconds * 2
     )

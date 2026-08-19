@@ -67,6 +67,7 @@ export function Hero({ onSubmit, disabled }: { onSubmit: (q: string) => void; di
           Try: "Analyze NVIDIA" · "Compare NVIDIA and AMD" · "Analyze my portfolio of NVIDIA, Apple and
           Microsoft"
         </p>
+        <p className="mt-1.5 text-xs text-slate-600">Currently covers US-listed stocks (NYSE/NASDAQ) only.</p>
       </div>
 
       <div className="mt-14 grid w-full gap-4 sm:grid-cols-3">

@@ -24,7 +24,7 @@ from app.graph.nodes.followup_router_node import FollowUpDecision
 from app.graph.nodes.news_node import NewsAnalysis, NewsLLMFinding
 from app.graph.state import new_state
 from app.llm.errors import LLMAnalysisError
-from app.tools.yahoo_finance import FundamentalsData, TechnicalData
+from app.tools.yahoo_finance import FundamentalsData, ResolvedTicker, TechnicalData
 from app.tools.web_search import SearchResult
 
 FAKE_FUNDAMENTALS = FundamentalsData(
@@ -343,8 +343,8 @@ async def test_followup_add_ticker_flips_query_type_and_runs_all_agents(
     call_counts: dict[str, int] = {}
     _mock_tools(monkeypatch, call_counts)
 
-    async def _fake_resolve(ticker: str) -> str:
-        return ticker
+    async def _fake_resolve(ticker: str) -> ResolvedTicker:
+        return ResolvedTicker(ticker)
 
     monkeypatch.setattr(followup_mod, "aresolve_ticker", _fake_resolve)
     _mock_followup_decision(monkeypatch, path="add_ticker", new_tickers=["MSFT"])
@@ -509,8 +509,8 @@ async def test_followup_clarification_resolving_to_add_ticker_merges_into_the_se
     call_counts: dict[str, int] = {}
     _mock_tools(monkeypatch, call_counts)
 
-    async def _fake_resolve(ticker: str) -> str:
-        return ticker
+    async def _fake_resolve(ticker: str) -> ResolvedTicker:
+        return ResolvedTicker(ticker)
 
     monkeypatch.setattr(followup_mod, "aresolve_ticker", _fake_resolve)
     _mock_followup_clarification_decision(

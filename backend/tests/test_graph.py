@@ -24,7 +24,7 @@ from app.graph.state import failed_result, new_state, ok_result
 from app.llm.errors import LLMAnalysisError
 from app.tools.errors import WebSearchError, YahooFinanceError
 from app.tools.web_search import SearchResult
-from app.tools.yahoo_finance import FundamentalsData, TechnicalData
+from app.tools.yahoo_finance import FundamentalsData, ResolvedTicker, TechnicalData
 
 FAKE_FUNDAMENTALS = FundamentalsData(
     ticker="AAPL", name="Apple Inc.", sector="Technology", industry="Consumer Electronics",
@@ -327,8 +327,8 @@ def _mock_router_decision(
             unaddressed_note=unaddressed_note,
         )
 
-    async def _fake_resolve(ticker: str) -> str | None:
-        return ticker if exists_map.get(ticker, True) else None
+    async def _fake_resolve(ticker: str) -> ResolvedTicker:
+        return ResolvedTicker(ticker if exists_map.get(ticker, True) else None)
 
     monkeypatch.setattr(router_mod, "run_structured_analysis", _fake_decision)
     monkeypatch.setattr(router_mod, "aresolve_ticker", _fake_resolve)
@@ -364,8 +364,8 @@ def _mock_clarification_decision(
             unaddressed_note=unaddressed_note,
         )
 
-    async def _fake_resolve(ticker: str) -> str | None:
-        return ticker if exists_map.get(ticker, True) else None
+    async def _fake_resolve(ticker: str) -> ResolvedTicker:
+        return ResolvedTicker(ticker if exists_map.get(ticker, True) else None)
 
     monkeypatch.setattr(clarification_mod, "run_structured_analysis", _fake_decision)
     monkeypatch.setattr(router_mod, "aresolve_ticker", _fake_resolve)

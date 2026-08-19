@@ -208,9 +208,10 @@ def _twelvedata_body(history: pd.DataFrame) -> dict:
 
 
 class FakeResponse:
-    def __init__(self, body: dict, status_code: int = 200) -> None:
+    def __init__(self, body: dict, status_code: int = 200, text: str = "") -> None:
         self._body = body
         self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self) -> None:
         return None
@@ -282,7 +283,7 @@ def test_fetch_history_404_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(yahoo_finance.requests, "get", _fake_get)
 
-    assert yahoo_finance.resolve_ticker("ZZZINVALID") is None
+    assert yahoo_finance.resolve_ticker("ZZZINVALID").symbol is None
     # 1 request per candidate (bare + 2 suffixes), no retries on any of them.
     assert calls["count"] == 3
 
@@ -309,7 +310,10 @@ def test_resolve_ticker_returns_bare_symbol_when_fully_usable(monkeypatch: pytes
         yahoo_finance.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
     )
 
-    assert yahoo_finance.resolve_ticker("aapl") == "AAPL"
+    result = yahoo_finance.resolve_ticker("aapl")
+
+    assert result.symbol == "AAPL"
+    assert result.unsupported_market is False
 
 
 def test_resolve_ticker_falls_back_to_ns_suffix_when_bare_symbol_is_delisted(
@@ -330,7 +334,7 @@ def test_resolve_ticker_falls_back_to_ns_suffix_when_bare_symbol_is_delisted(
 
     monkeypatch.setattr(yahoo_finance.requests, "get", _fake_get)
 
-    assert yahoo_finance.resolve_ticker("TCS") == "TCS.NS"
+    assert yahoo_finance.resolve_ticker("TCS").symbol == "TCS.NS"
 
 
 def test_resolve_ticker_returns_none_when_no_variant_is_usable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,7 +344,51 @@ def test_resolve_ticker_returns_none_when_no_variant_is_usable(monkeypatch: pyte
         lambda *a, **kw: FakeResponse({"status": "error", "message": "not found"}),  # noqa: ARG005
     )
 
-    assert yahoo_finance.resolve_ticker("ZZZINVALID") is None
+    result = yahoo_finance.resolve_ticker("ZZZINVALID")
+
+    assert result.symbol is None
+    assert result.unsupported_market is False
+
+
+def test_resolve_ticker_flags_unsupported_market_for_plan_gated_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for the real Twelve Data behavior (confirmed live against TCS):
+    a symbol that exists but isn't covered by the free plan returns a 404 with
+    "available starting with the Grow or Venture plan" in the body — distinct from a
+    genuinely invalid symbol's 404, and it should surface as `unsupported_market`, not
+    a plain "could not be found"."""
+
+    def _fake_get(url: str, params: dict, **kwargs: object) -> FakeResponse:  # noqa: ARG001
+        return FakeResponse(
+            {"code": 404, "message": "This symbol is available starting with the Grow or Venture plan."},
+            status_code=404,
+            text="This symbol is available starting with the Grow or Venture plan.",
+        )
+
+    monkeypatch.setattr(yahoo_finance.requests, "get", _fake_get)
+
+    result = yahoo_finance.resolve_ticker("TCS")
+
+    assert result.symbol is None
+    assert result.unsupported_market is True
+
+
+def test_resolve_ticker_plan_gated_symbol_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same reasoning as the 404-not-retried test: a plan-gated symbol will never
+    succeed no matter how many times it's retried, so retrying it would only waste the
+    free-tier rate limit."""
+    calls = {"count": 0}
+
+    def _fake_get(url: str, params: dict, **kwargs: object) -> FakeResponse:  # noqa: ARG001
+        calls["count"] += 1
+        return FakeResponse({}, status_code=404, text="available starting with the Grow plan")
+
+    monkeypatch.setattr(yahoo_finance.requests, "get", _fake_get)
+
+    yahoo_finance.resolve_ticker("TCS")
+
+    assert calls["count"] == 3  # 1 per candidate (bare + 2 suffixes), no retries
 
 
 async def test_aresolve_ticker_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,7 +397,9 @@ async def test_aresolve_ticker_happy_path(monkeypatch: pytest.MonkeyPatch) -> No
         yahoo_finance.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
     )
 
-    assert await yahoo_finance.aresolve_ticker("AAPL") == "AAPL"
+    result = await yahoo_finance.aresolve_ticker("AAPL")
+
+    assert result.symbol == "AAPL"
 
 
 # --- async wrappers --------------------------------------------------------------------
