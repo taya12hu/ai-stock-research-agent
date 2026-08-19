@@ -37,4 +37,6 @@ Thumbs.db
 
 # Dev server logs
 **/.dev-server.log
-.claude/scheduled_tasks.lock
+
+# Claude Code session config (tool-specific, not project config)
+.claude/
