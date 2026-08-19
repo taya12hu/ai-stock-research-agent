@@ -55,9 +55,13 @@ def _finding_source(article: SearchResult | None) -> Source:
 
 async def news_node(state: ResearchState) -> dict:
     ticker = state["tickers"][0]
+    # `ticker` may carry a resolved exchange suffix (e.g. "TCS.NS" — see
+    # `aresolve_ticker`); strip it for the search query, since a suffix helps Yahoo
+    # Finance disambiguate a symbol but only hurts a general web search's relevance.
+    search_term = ticker.split(".")[0]
 
     try:
-        results = await asearch_news(f"{ticker} stock news", max_results=6)
+        results = await asearch_news(f"{search_term} stock news", max_results=6)
     except WebSearchError as exc:
         log_event(logger, "news search failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
         return {"per_ticker_results": {ticker: {"news": failed_result(str(exc))}}}

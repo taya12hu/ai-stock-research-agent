@@ -16,6 +16,7 @@ Design notes (see ARCHITECTURE.md §6, §10):
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 
 from cachetools import TTLCache, cached
@@ -24,7 +25,7 @@ from ddgs.exceptions import DDGSException, RatelimitException, TimeoutException
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.config import settings
-from app.logging_config import get_logger, trace
+from app.logging_config import get_logger, log_event, trace
 from app.tools.errors import WebSearchError
 
 logger = get_logger("app.tools.web_search")
@@ -85,15 +86,20 @@ def _parse_text(raw: dict) -> SearchResult:
     )
 
 
+def _search_failed(stage: str, query: str, exc: Exception) -> WebSearchError:
+    log_event(logger, f"{stage} search failed", level=logging.WARNING, query=query, error=str(exc))
+    return WebSearchError(f"Unable to search for news on \"{query}\" right now.")
+
+
 def search_news(query: str, max_results: int = 5) -> list[SearchResult]:
     try:
         raw_results = _fetch_news(query, max_results)
     except DDGSException as exc:
         if not _is_no_results(exc):
-            raise WebSearchError(f"news search failed for query '{query}': {exc}") from exc
+            raise _search_failed("news", query, exc) from exc
         raw_results = ()
     except Exception as exc:
-        raise WebSearchError(f"news search failed for query '{query}': {exc}") from exc
+        raise _search_failed("news", query, exc) from exc
 
     if raw_results:
         return [_parse_news(r) for r in raw_results]
@@ -104,9 +110,9 @@ def search_news(query: str, max_results: int = 5) -> list[SearchResult]:
     except DDGSException as exc:
         if _is_no_results(exc):
             return []
-        raise WebSearchError(f"text search fallback failed for query '{query}': {exc}") from exc
+        raise _search_failed("text", query, exc) from exc
     except Exception as exc:
-        raise WebSearchError(f"text search fallback failed for query '{query}': {exc}") from exc
+        raise _search_failed("text", query, exc) from exc
 
     return [_parse_text(r) for r in raw_results]
 

@@ -76,6 +76,22 @@ def test_get_fundamentals_invalid_ticker_raises(monkeypatch: pytest.MonkeyPatch)
         yahoo_finance.get_fundamentals("ZZZINVALID")
 
 
+def test_get_fundamentals_fetch_failure_message_is_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The raised message is user-facing (surfaces in a failed AgentResult) and must
+    never leak the raw underlying exception text — only a fixed, friendly message."""
+
+    def _raise(ticker: str) -> FakeTicker:  # noqa: ARG001
+        raise ValueError("obscure internal parsing failure with a stack-trace-like body")
+
+    monkeypatch.setattr(yahoo_finance.yf, "Ticker", _raise)
+
+    with pytest.raises(YahooFinanceError) as exc_info:
+        yahoo_finance.get_fundamentals("AAPL")
+
+    assert "Unable to fetch fundamentals data" in str(exc_info.value)
+    assert "stack-trace-like" not in str(exc_info.value)
+
+
 def test_ticker_exists_true_for_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO))  # noqa: ARG005
 
@@ -176,6 +192,60 @@ def test_get_technical_data_empty_history_raises(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(YahooFinanceError, match="no price history"):
         yahoo_finance.get_technical_data("ZZZINVALID")
+
+
+def test_get_technical_data_fetch_failure_message_is_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(ticker: str) -> FakeTicker:  # noqa: ARG001
+        raise ValueError("obscure internal parsing failure with a stack-trace-like body")
+
+    monkeypatch.setattr(yahoo_finance.yf, "Ticker", _raise)
+
+    with pytest.raises(YahooFinanceError) as exc_info:
+        yahoo_finance.get_technical_data("AAPL")
+
+    assert "Unable to fetch price history" in str(exc_info.value)
+    assert "stack-trace-like" not in str(exc_info.value)
+
+
+# --- yahoo_finance: ticker resolution / exchange-suffix fallback ----------------------
+
+
+def test_resolve_ticker_returns_bare_symbol_when_fully_usable(monkeypatch: pytest.MonkeyPatch) -> None:
+    history = _synthetic_history()
+    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO, history))  # noqa: ARG005
+
+    assert yahoo_finance.resolve_ticker("aapl") == "AAPL"
+
+
+def test_resolve_ticker_falls_back_to_ns_suffix_when_bare_symbol_is_delisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for the real observed collision: bare 'TCS' returns real-looking
+    `.info` (so `_has_real_data`/`ticker_exists` alone would call it valid) but empty
+    price history — the wrong or delisted company. 'TCS.NS' is the actual usable
+    listing. No name-to-suffix lookup table involved: both variants are genuinely
+    probed against (fake) Yahoo Finance."""
+    history = _synthetic_history()
+    fakes = {
+        "TCS": FakeTicker({"symbol": "TCS", "shortName": "Some Other Co"}, pd.DataFrame()),
+        "TCS.NS": FakeTicker({"symbol": "TCS.NS", "shortName": "Tata Consultancy Services"}, history),
+    }
+    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: fakes[ticker])
+
+    assert yahoo_finance.resolve_ticker("TCS") == "TCS.NS"
+
+
+def test_resolve_ticker_returns_none_when_no_variant_is_usable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(INVALID_INFO, pd.DataFrame()))  # noqa: ARG005
+
+    assert yahoo_finance.resolve_ticker("ZZZINVALID") is None
+
+
+async def test_aresolve_ticker_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    history = _synthetic_history()
+    monkeypatch.setattr(yahoo_finance.yf, "Ticker", lambda ticker: FakeTicker(VALID_INFO, history))  # noqa: ARG005
+
+    assert await yahoo_finance.aresolve_ticker("AAPL") == "AAPL"
 
 
 # --- async wrappers --------------------------------------------------------------------
@@ -287,8 +357,11 @@ def test_search_news_raises_on_real_failure(monkeypatch: pytest.MonkeyPatch) -> 
         ),
     )
 
-    with pytest.raises(WebSearchError, match="news search failed"):
+    # The exception's message is user-facing (shown in a failed AgentResult) and must
+    # never leak the raw underlying error — that detail is logged instead, not raised.
+    with pytest.raises(WebSearchError, match="Unable to search for news") as exc_info:
         web_search.search_news("NVIDIA stock news")
+    assert "Backend engine crashed" not in str(exc_info.value)
 
 
 async def test_asearch_news_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
