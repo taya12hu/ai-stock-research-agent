@@ -231,6 +231,56 @@ async def test_followup_answer_path_makes_no_new_tool_calls(monkeypatch: pytest.
     assert [m["role"] for m in result["conversation_history"][-2:]] == ["user", "assistant"]
 
 
+async def test_followup_answer_path_escalates_to_refresh_when_data_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for the context-sufficiency gap: whether a follow-up needs fresh
+    data is otherwise decided entirely by one soft LLM judgment call
+    (`FollowUpDecision.path`), which can misjudge "already covered" for something that's
+    quietly gone stale (e.g. "what's the RSI *right now*"). A ticker whose stored data has
+    aged past the freshness window must be refreshed before being answered from, not
+    silently served as current, regardless of what the classifier decided."""
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    _, graph, config = await _initial_run(monkeypatch, checkpointer, thread_id)
+
+    old_timestamp = "2000-01-01T00:00:00+00:00"
+    await graph.aupdate_state(
+        config,
+        {"per_ticker_fetched_at": {"AAPL": {"fundamentals": old_timestamp, "technical": old_timestamp, "news": old_timestamp}}},
+    )
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_decision(monkeypatch, path="answer")
+
+    result = await graph.ainvoke({"user_question": "What's the current RSI?"}, config=config)
+
+    assert result["followup_path"] == "refresh"  # escalated, not "answer"
+    assert call_counts == {"fundamentals": 1, "technical": 1, "news": 1}
+    assert any("freshness" in note.lower() for note in result["notes"])
+
+
+async def test_followup_answer_path_stays_answer_when_only_partially_stale_but_fresh_enough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The freshness guard checks actual elapsed time, not just presence of a timestamp —
+    data fetched moments ago (as in a normal same-session follow-up) must not be treated
+    as stale just because some time technically passed."""
+    checkpointer = InMemorySaver()
+    thread_id = str(uuid.uuid4())
+    _, graph, config = await _initial_run(monkeypatch, checkpointer, thread_id)
+
+    call_counts: dict[str, int] = {}
+    _mock_tools(monkeypatch, call_counts)
+    _mock_followup_decision(monkeypatch, path="answer")
+
+    result = await graph.ainvoke({"user_question": "What's the P/E ratio?"}, config=config)
+
+    assert result["followup_path"] == "answer"
+    assert call_counts == {}  # no escalation — data was just fetched
+
+
 async def test_followup_unrelated_path_gets_polite_reply_without_running_agents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

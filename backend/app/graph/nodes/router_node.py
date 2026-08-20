@@ -63,6 +63,17 @@ class TickerCandidate(BaseModel):
 
 
 class RouterDecision(BaseModel):
+    # `tickers` is typed `list[...] | None`, not just `list[...]` — a real observed
+    # failure: a plain `list[X]` annotation makes Groq's structured-output enforcement
+    # generate a strict `array`-typed JSON schema, and when the model (correctly, per
+    # this field's own instructions) has nothing to put here, it emits `null` rather than
+    # `[]`. Groq's server-side validator then rejects the tool call outright as
+    # `tool_use_failed` — every time, since it's a consistent model habit, not sampling
+    # noise, so the 3-attempt retry in `_shared.py` exhausts without ever succeeding.
+    # Widening the type to allow `null` lets Groq accept what the model actually sends;
+    # `default_factory=list` is kept so a direct Python construction (tests, the abandoned-
+    # clarification path) still defaults to `[]`, not `None` — every call site reads
+    # `decision.tickers or []` to handle both.
     is_stock_related: bool = Field(
         default=True,
         description=(
@@ -83,7 +94,7 @@ class RouterDecision(BaseModel):
             "no need to set it) when is_stock_related is false."
         )
     )
-    tickers: list[TickerCandidate] = Field(
+    tickers: list[TickerCandidate] | None = Field(
         default_factory=list,
         description=(
             "Every distinct publicly-traded company/stock ticker the user is actually "
@@ -296,6 +307,25 @@ async def resolve_tickers(
     return valid_tickers, query_type, notes
 
 
+def clarification_reset() -> dict:
+    """The clarification-tracking fields, reset to their "nothing pending" values —
+    shared by every branch below that resolves or bypasses a clarification (off-topic,
+    discovery, or a normal research outcome), and reused as-is by
+    `clarification_response_node`'s own resolved-reply branch, so the reset can't drift
+    out of sync between the two the way `apply_followup_decision`'s `result.setdefault(...)`
+    already guards against on the follow-up side. Not used by the `needs_clarification`
+    branch below, which sets `awaiting_clarification=True` on purpose.
+    """
+    return {
+        "awaiting_clarification": False,
+        "clarification_question": None,
+        "pending_question": None,
+        "pending_intent": None,
+        "off_topic_reply": None,
+        "clarification_origin": None,
+    }
+
+
 async def apply_router_decision(decision: RouterDecision, user_question: str, session_id: str) -> dict:
     """Turns a `RouterDecision` into a state update for a fresh (non-clarification-
     reply) message. Used by `router_node` directly, and reused by
@@ -312,15 +342,11 @@ async def apply_router_decision(decision: RouterDecision, user_question: str, se
             "query_type": "single",
             "notes": [],
             "conversation_history": user_turn,
-            "awaiting_clarification": False,
-            "clarification_question": None,
-            "pending_question": None,
-            "pending_intent": None,
+            **clarification_reset(),
             "off_topic_reply": decision.off_topic_reply or DEFAULT_OFF_TOPIC_REPLY,
-            "clarification_origin": None,
         }
 
-    raw_tickers = [c.ticker for c in decision.tickers]
+    raw_tickers = [c.ticker for c in decision.tickers or []]
 
     # Backend guard, not just a prompt instruction: a real named company always beats
     # the discovery flag, regardless of what the model set it to — concrete information
@@ -334,12 +360,8 @@ async def apply_router_decision(decision: RouterDecision, user_question: str, se
             "query_type": "single",
             "notes": [],
             "conversation_history": user_turn,
-            "awaiting_clarification": False,
-            "clarification_question": None,
-            "pending_question": None,
-            "pending_intent": None,
+            **clarification_reset(),
             "off_topic_reply": decision.discovery_reply or DEFAULT_DISCOVERY_REPLY,
-            "clarification_origin": None,
         }
 
     valid_tickers, query_type, notes = await resolve_tickers(raw_tickers, decision.query_type)
@@ -375,12 +397,7 @@ async def apply_router_decision(decision: RouterDecision, user_question: str, se
         "query_type": query_type,
         "notes": notes,
         "conversation_history": user_turn,
-        "awaiting_clarification": False,
-        "clarification_question": None,
-        "pending_question": None,
-        "pending_intent": None,
-        "off_topic_reply": None,
-        "clarification_origin": None,
+        **clarification_reset(),
     }
 
 
@@ -406,12 +423,8 @@ async def router_node(state: ResearchState) -> dict:
             "query_type": "single",
             "notes": [],
             "conversation_history": [{"role": "user", "content": state["user_question"]}],
-            "awaiting_clarification": False,
-            "clarification_question": None,
-            "pending_question": None,
-            "pending_intent": None,
+            **clarification_reset(),
             "off_topic_reply": str(exc),
-            "clarification_origin": None,
         }
 
     return await apply_router_decision(decision, state["user_question"], state["session_id"])

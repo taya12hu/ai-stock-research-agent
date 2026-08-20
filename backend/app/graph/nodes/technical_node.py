@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.graph.nodes._shared import build_findings, run_structured_analysis
+from app.graph.nodes._shared import build_findings, node_result, run_structured_analysis
 from app.graph.state import Finding, ResearchState, Source, failed_result, ok_result
 from app.llm.errors import LLMAnalysisError
 from app.logging_config import get_logger, log_event
@@ -54,7 +54,7 @@ async def technical_node(state: ResearchState) -> dict:
         data = await aget_technical_data(ticker)
     except YahooFinanceError as exc:
         log_event(logger, "technical data fetch failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
-        return {"per_ticker_results": {ticker: {"technical": failed_result(str(exc))}}}
+        return node_result(ticker, "technical", failed_result(str(exc)))
 
     facts = _facts(data)
     if len(facts) < MIN_FACTS_FOR_ANALYSIS:
@@ -62,17 +62,16 @@ async def technical_node(state: ResearchState) -> dict:
             logger, "technical: too little data to analyze", session_id=state["session_id"],
             ticker=ticker, fact_count=len(facts),
         )
-        return {
-            "per_ticker_results": {
-                ticker: {"technical": failed_result(f"Not enough price/indicator data was available for {ticker} to analyze.")}
-            }
-        }
+        return node_result(
+            ticker, "technical",
+            failed_result(f"Not enough price/indicator data was available for {ticker} to analyze."),
+        )
 
     try:
         analysis = await run_structured_analysis(_build_prompt(data, facts))
     except LLMAnalysisError as exc:
         log_event(logger, "technical analysis failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
-        return {"per_ticker_results": {ticker: {"technical": failed_result(str(exc))}}}
+        return node_result(ticker, "technical", failed_result(str(exc)))
 
     source = Source(
         type="yahoo_finance",
@@ -89,4 +88,4 @@ async def technical_node(state: ResearchState) -> dict:
         logger, "technical node completed", session_id=state["session_id"],
         ticker=ticker, finding_count=len(findings),
     )
-    return {"per_ticker_results": {ticker: {"technical": ok_result(analysis.summary, findings)}}}
+    return node_result(ticker, "technical", ok_result(analysis.summary, findings))

@@ -267,6 +267,12 @@ class ResearchState(TypedDict):
                             "discovery", "needs_clarification"] | None
     followup_targets: list[FollowUpTarget]      # [{ticker, agents: [AgentName, ...]}, ...]
     followup_answer: str | None
+    # When each (ticker, agent) result was produced, ISO8601 UTC — set by every specialist
+    # node on both success and failure. Backs the follow-up freshness guard (§8): distinct
+    # from Finding.source.as_of, which means something different per agent (a fetch
+    # timestamp for fundamentals, but the last trading day for technical, or an article's
+    # own publish date for news) and so can't answer "how long ago did *we* fetch this."
+    per_ticker_fetched_at: Annotated[dict[str, dict[AgentName, str]], merge_fetched_at]
     # Set when a request is clearly stock-related but names no company; while True,
     # entry_router routes the *next* turn deterministically to the matching resolver
     # instead of letting an LLM re-classify it as a new, unrelated request.
@@ -349,8 +355,17 @@ be answered from stored text alone). `followup_router_node` classifies each foll
 one of six `followup_path` outcomes, doing only as much work as needed:
 
 1. **`answer`** — fully answerable from the session's stored `per_ticker_results` /
-   `final_report` / conversation history. Routed to `answer_from_context_node`: one
-   grounded LLM call, no tool calls.
+   `final_report` / conversation history. Backstopped by a deterministic freshness guard,
+   not just the classifier's own judgment call: if any relevant ticker's
+   `per_ticker_fetched_at` is older than the tool-layer cache TTL (300s) or was never
+   fully fetched, the turn is upgraded to `refresh` instead — a single LLM call deciding
+   "already covered" has no way to notice that the data has quietly gone stale since (e.g.
+   "what's the RSI *right now*" minutes after the last fetch). Otherwise routed to
+   `answer_from_context_node`, which is given the raw per-ticker findings as well as the
+   rendered report — the report only ever carries a subset of them (`MAX_FINDINGS_PER_AGENT`),
+   so this is what lets it correctly answer something that was fetched but didn't make the
+   final report's cut, instead of wrongly saying "not covered": one grounded LLM call, no
+   tool calls.
 2. **`refresh`** — needs updated data for an *existing* ticker (e.g. "any news today for
    NVDA?"). Re-enters the graph at just the relevant specialist node(s) via `Send`, updates
    `per_ticker_results`, re-runs the appropriate synthesis node.
