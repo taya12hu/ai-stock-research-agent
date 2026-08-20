@@ -9,13 +9,14 @@ policy, and conversion of LLM output into `Finding` objects with stable ids.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import TypeVar
 
 import groq
 from pydantic import BaseModel, Field
 from tenacity import retry, retry_if_exception, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from app.graph.state import AgentName, Finding, Source
+from app.graph.state import AgentName, AgentResult, Finding, Source
 from app.llm.errors import RATE_LIMIT_MESSAGE, LLMAnalysisError, is_rate_limited
 from app.llm.groq_client import get_chat_model
 from app.logging_config import get_logger, log_event
@@ -91,6 +92,23 @@ async def run_structured_analysis(prompt: str, schema: type[T] = NodeAnalysis) -
         if is_rate_limited(exc):
             raise LLMAnalysisError(RATE_LIMIT_MESSAGE) from exc
         raise LLMAnalysisError("The analysis service is temporarily unavailable.") from exc
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def node_result(ticker: str, agent: AgentName, result: AgentResult) -> dict:
+    """Every specialist node's return value, in one place — wraps an `AgentResult` into
+    the state update and stamps when this (ticker, agent) attempt completed, success or
+    failure alike. That timestamp (`per_ticker_fetched_at`, see state.py) is what lets a
+    follow-up's "answer from context" path tell fresh results from stale ones instead of
+    trusting a single classification LLM call's guess about whether a refresh is needed.
+    """
+    return {
+        "per_ticker_results": {ticker: {agent: result}},
+        "per_ticker_fetched_at": {ticker: {agent: now_iso()}},
+    }
 
 
 def build_findings(

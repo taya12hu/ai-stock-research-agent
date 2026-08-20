@@ -41,6 +41,7 @@ session's existing tickers vs. replace them wholesale) — see that module's doc
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -53,6 +54,35 @@ from app.logging_config import get_logger, log_event
 from app.tools.yahoo_finance import aresolve_ticker
 
 logger = get_logger("app.graph.nodes.followup_router")
+
+# Matches the tool-layer cache TTL (`_CACHE_TTL_SECONDS` in tools/yahoo_finance.py and
+# tools/web_search.py) — past this point the underlying fetch has already expired from
+# cache, so a stored finding older than this is provably not what a fresh call would
+# return right now. Used by `_stale_tickers` below as a deterministic backstop on the
+# "answer" path: whether a follow-up needs fresh data is otherwise decided by a single
+# soft LLM judgment call (`FollowUpDecision.path`), which can misjudge "already covered"
+# for something that's quietly gone stale (e.g. "what's the RSI *right now*").
+ANSWER_FRESHNESS_SECONDS = 300
+
+
+def _stale_tickers(state: ResearchState) -> list[str]:
+    """Which of the session's tickers have data older than `ANSWER_FRESHNESS_SECONDS`, or
+    were never fully fetched at all (fewer than all three agents have a timestamp).
+    Deterministic — it doesn't ask the model "is this fresh enough," which is exactly the
+    soft judgment call that let an "answer" classification silently serve stale context.
+    """
+    fetched_at = state.get("per_ticker_fetched_at") or {}
+    now = datetime.now(timezone.utc)
+    stale: list[str] = []
+    for ticker in state["tickers"]:
+        timestamps = fetched_at.get(ticker) or {}
+        if len(timestamps) < len(AGENT_NAMES):
+            stale.append(ticker)
+            continue
+        oldest = min(datetime.fromisoformat(ts) for ts in timestamps.values())
+        if (now - oldest).total_seconds() > ANSWER_FRESHNESS_SECONDS:
+            stale.append(ticker)
+    return stale
 
 
 class FollowUpDecision(BaseModel):
@@ -101,7 +131,12 @@ class FollowUpDecision(BaseModel):
             "in it, not even as an example. Otherwise null."
         ),
     )
-    refresh_tickers: list[str] = Field(
+    # These three are typed `list[...] | None`, keeping `default_factory=list` — see
+    # `RouterDecision.tickers`'s comment in router_node.py for why: Groq's structured-
+    # output enforcement rejects `null` against a strict `array`-typed schema, and the
+    # model reliably sends `null` for whichever of these don't apply to the chosen path
+    # (e.g. `new_tickers` on a plain "answer"). Every call site reads `... or []`.
+    refresh_tickers: list[str] | None = Field(
         default_factory=list,
         description=(
             "For path='refresh': which of the session's EXISTING tickers (listed above "
@@ -109,14 +144,14 @@ class FollowUpDecision(BaseModel):
             "a new one."
         ),
     )
-    refresh_agents: list[AgentName] = Field(
+    refresh_agents: list[AgentName] | None = Field(
         default_factory=list,
         description=(
             "For path='refresh': which analyses to refresh. If the question implies all "
             "of them, include all three."
         ),
     )
-    new_tickers: list[str] = Field(
+    new_tickers: list[str] | None = Field(
         default_factory=list,
         description=(
             "For path='add_ticker' ONLY: the stock TICKER SYMBOL (not the company name) "
@@ -238,7 +273,26 @@ async def apply_followup_decision(decision: FollowUpDecision, state: ResearchSta
             "off_topic_reply": decision.discovery_reply or DEFAULT_DISCOVERY_REPLY,
         }
     else:
-        result = {"followup_path": "answer", "followup_targets": []}
+        stale = _stale_tickers(state)
+        if stale:
+            # The classifier said "answer" — fully covered by existing research — but the
+            # data for at least one relevant ticker has aged past the freshness window.
+            # Escalate to a refresh instead of trusting that judgment call at face value;
+            # see `_stale_tickers`'s docstring and `ANSWER_FRESHNESS_SECONDS` above.
+            log_event(
+                logger, "followup answer escalated to refresh: stale data",
+                session_id=state["session_id"], tickers=stale,
+            )
+            result = {
+                "followup_path": "refresh",
+                "followup_targets": [{"ticker": t, "agents": list(AGENT_NAMES)} for t in stale],
+                "notes": [
+                    f"Refreshed {', '.join(stale)} first — the stored research had aged "
+                    f"past the {ANSWER_FRESHNESS_SECONDS // 60}-minute freshness window."
+                ],
+            }
+        else:
+            result = {"followup_path": "answer", "followup_targets": []}
 
     # Explicit resets, same discipline as `router_node.apply_router_decision` — every
     # branch above can be reached right after a resolved/abandoned clarification, so a
@@ -264,7 +318,7 @@ def _bare(ticker: str) -> str:
 
 def _plan_refresh(state: ResearchState, decision: FollowUpDecision) -> dict:
     existing_by_bare = {_bare(t): t for t in state["tickers"]}
-    requested = [t.strip().upper() for t in decision.refresh_tickers if t.strip()]
+    requested = [t.strip().upper() for t in decision.refresh_tickers or [] if t.strip()]
     refresh_tickers = list(
         dict.fromkeys(existing_by_bare[_bare(t)] for t in requested if _bare(t) in existing_by_bare)
     )
@@ -293,7 +347,7 @@ async def _plan_add_ticker(state: ResearchState, decision: FollowUpDecision) -> 
     existing = state["tickers"]
     notes: list[str] = []
 
-    requested = list(dict.fromkeys(t.strip().upper() for t in decision.new_tickers if t.strip()))
+    requested = list(dict.fromkeys(t.strip().upper() for t in decision.new_tickers or [] if t.strip()))
     existing_bare = {_bare(t) for t in existing}
     already_present = [t for t in requested if _bare(t) in existing_bare]
     candidates = [t for t in requested if _bare(t) not in existing_bare]

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 
+from app.graph.nodes._synthesis_shared import ticker_section_block
 from app.graph.state import ResearchState
 from app.llm.errors import RATE_LIMIT_MESSAGE, is_rate_limited
 from app.llm.groq_client import get_chat_model
@@ -19,15 +20,26 @@ def _build_prompt(state: ResearchState) -> str:
         f"{m['role']}: {m['content']}" for m in state.get("conversation_history", [])[-8:]
     )
     report = state.get("final_report") or "(no prior report available)"
+    per_ticker = state.get("per_ticker_results", {})
+    # The written report only ever carries a subset of what was actually found — up to 5
+    # findings per agent, picked by the synthesis LLM for narrative flow, not completeness
+    # (see MAX_FINDINGS_PER_AGENT). Passing the underlying findings too, not just the
+    # prose, is what lets this node correctly answer something that was fetched but never
+    # made it into the report, instead of wrongly saying "not covered."
+    detail_blocks = "\n\n".join(
+        ticker_section_block(t, per_ticker.get(t, {})) for t in state["tickers"]
+    ) or "(no underlying findings available)"
     return (
         "You are answering a follow-up question in an ongoing stock research session, "
-        "grounded ONLY in the research already gathered below. If the answer genuinely "
-        "isn't covered by this context, say so plainly rather than guessing or inventing "
-        "facts. If asked for a buy/sell/hold view, give one grounded only in the findings "
-        "already gathered, with a brief rationale and a confidence qualifier, and note "
-        "that this is not personalized financial advice.\n\n"
+        "grounded ONLY in the research already gathered below — both the underlying "
+        "findings and the written report, which only ever contains a subset of them. If "
+        "the answer genuinely isn't covered by either, say so plainly rather than "
+        "guessing or inventing facts. If asked for a buy/sell/hold view, give one "
+        "grounded only in the findings already gathered, with a brief rationale and a "
+        "confidence qualifier, and note that this is not personalized financial advice.\n\n"
         f"Tickers researched: {', '.join(state['tickers'])}\n\n"
-        f"Most recent full report:\n{report}\n\n"
+        f"Underlying findings, per ticker:\n{detail_blocks}\n\n"
+        f"Most recently written report:\n{report}\n\n"
         f"Recent conversation:\n{history}\n\n"
         f'Follow-up question: "{state["user_question"]}"'
     )

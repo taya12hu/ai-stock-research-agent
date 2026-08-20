@@ -60,6 +60,21 @@ def merge_per_ticker_results(
     return merged
 
 
+def merge_fetched_at(
+    existing: dict[str, dict[AgentName, str]] | None,
+    update: dict[str, dict[AgentName, str]] | None,
+) -> dict[str, dict[AgentName, str]]:
+    """Reducer for `ResearchState.per_ticker_fetched_at` — same shape and same reason as
+    `merge_per_ticker_results` above: the three specialist nodes run in parallel and each
+    only reports its own (ticker, agent) timestamp, so a plain "last write wins" would
+    drop the other two instead of merging them in.
+    """
+    merged: dict[str, dict[AgentName, str]] = {k: dict(v) for k, v in (existing or {}).items()}
+    for ticker, agent_updates in (update or {}).items():
+        merged[ticker] = {**merged.get(ticker, {}), **agent_updates}
+    return merged
+
+
 class Message(TypedDict):
     role: Literal["user", "assistant"]
     content: str
@@ -75,6 +90,16 @@ class ResearchState(TypedDict):
     query_type: QueryType
     user_question: str
     per_ticker_results: Annotated[dict[str, TickerResults], merge_per_ticker_results]
+    # When each (ticker, agent) result was produced, ISO8601 UTC — set by every specialist
+    # node on both success and failure (see `nodes/_shared.py::node_result`), so a stale
+    # entry can be told apart from one that was never fetched. Deliberately independent of
+    # `Source.as_of`: that field means different things per agent (a fetch timestamp for
+    # fundamentals, but the last trading day for technical, or an article's own publish
+    # date for news) and so can't answer "how long ago did *we* last fetch this." Used by
+    # `followup_router_node`'s freshness guard to decide whether the "answer" path's
+    # stored context is still fresh enough to answer from, or should be escalated into a
+    # "refresh" instead of trusting a single LLM call's guess.
+    per_ticker_fetched_at: Annotated[dict[str, dict[AgentName, str]], merge_fetched_at]
     final_report: str | None
     # Every user turn and assistant reply (initial report or follow-up answer) is
     # appended here, grounding subsequent follow-ups — hence `operator.add`.
@@ -138,6 +163,7 @@ def new_state(
         query_type=query_type or "single",
         user_question=user_question,
         per_ticker_results={},
+        per_ticker_fetched_at={},
         final_report=None,
         conversation_history=[],
         session_id=session_id,

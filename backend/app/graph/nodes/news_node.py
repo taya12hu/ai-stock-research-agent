@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from app.graph.nodes._shared import MAX_FINDINGS_PER_AGENT, LLMFinding, NodeAnalysis, run_structured_analysis
+from app.graph.nodes._shared import MAX_FINDINGS_PER_AGENT, LLMFinding, NodeAnalysis, node_result, run_structured_analysis
 from app.graph.state import Finding, ResearchState, Source, failed_result, ok_result
 from app.llm.errors import LLMAnalysisError
 from app.logging_config import get_logger, log_event
@@ -81,17 +81,17 @@ async def news_node(state: ResearchState) -> dict:
         results = await asearch_news(query, max_results=6)
     except WebSearchError as exc:
         log_event(logger, "news search failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
-        return {"per_ticker_results": {ticker: {"news": failed_result(str(exc))}}}
+        return node_result(ticker, "news", failed_result(str(exc)))
 
     if not results:
         summary = f"No recent news articles were found for {ticker}."
-        return {"per_ticker_results": {ticker: {"news": ok_result(summary, [])}}}
+        return node_result(ticker, "news", ok_result(summary, []))
 
     try:
         analysis = await run_structured_analysis(_build_prompt(ticker, company_name, results), schema=NewsAnalysis)
     except LLMAnalysisError as exc:
         log_event(logger, "news analysis failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
-        return {"per_ticker_results": {ticker: {"news": failed_result(str(exc))}}}
+        return node_result(ticker, "news", failed_result(str(exc)))
 
     findings: list[Finding] = []
     for i, f in enumerate(analysis.findings[:MAX_FINDINGS_PER_AGENT]):
@@ -111,4 +111,4 @@ async def news_node(state: ResearchState) -> dict:
         logger, "news node completed", session_id=state["session_id"],
         ticker=ticker, finding_count=len(findings), article_count=len(results),
     )
-    return {"per_ticker_results": {ticker: {"news": ok_result(summary, findings)}}}
+    return node_result(ticker, "news", ok_result(summary, findings))

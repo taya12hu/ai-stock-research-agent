@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 
 from app.graph.nodes._shared import run_structured_analysis
-from app.graph.nodes.router_node import RouterDecision, apply_router_decision, resolve_tickers
+from app.graph.nodes.router_node import RouterDecision, apply_router_decision, clarification_reset, resolve_tickers
 from app.graph.state import QueryType, ResearchState
 from app.llm.errors import LLMAnalysisError
 from app.logging_config import get_logger, log_event
@@ -98,12 +98,8 @@ async def clarification_response_node(state: ResearchState) -> dict:
             "query_type": "single",
             "notes": [],
             "conversation_history": [{"role": "user", "content": reply}],
-            "awaiting_clarification": False,
-            "clarification_question": None,
-            "pending_question": None,
-            "pending_intent": None,
+            **clarification_reset(),
             "off_topic_reply": str(exc),
-            "clarification_origin": None,
         }
 
     if not decision.resolves_pending_clarification:
@@ -113,7 +109,7 @@ async def clarification_response_node(state: ResearchState) -> dict:
         )
         return await apply_router_decision(decision, reply, state["session_id"])
 
-    raw_tickers = [c.ticker for c in decision.tickers]
+    raw_tickers = [c.ticker for c in decision.tickers or []]
     valid_tickers, query_type, notes = await resolve_tickers(raw_tickers, pending_intent)
     if decision.unaddressed_note:
         notes = [*notes, decision.unaddressed_note]
@@ -134,10 +130,5 @@ async def clarification_response_node(state: ResearchState) -> dict:
         "query_type": query_type,
         "notes": notes,
         "conversation_history": [{"role": "user", "content": reply}],
-        "awaiting_clarification": False,
-        "clarification_question": None,
-        "pending_question": None,
-        "pending_intent": None,
-        "off_topic_reply": None,
-        "clarification_origin": None,
+        **clarification_reset(),
     }
