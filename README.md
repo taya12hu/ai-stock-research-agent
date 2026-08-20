@@ -10,8 +10,7 @@ This is a learning-scoped project. It is **not** an autonomous trading system or
 production financial platform — see [ARCHITECTURE.md](./ARCHITECTURE.md) §12 for
 explicit non-goals.
 
-Full system design lives in [ARCHITECTURE.md](./ARCHITECTURE.md). Task tracking lives in
-[TODO.md](./TODO.md).
+Full system design lives in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## What it does
 
@@ -80,5 +79,7 @@ Get-Content logs/dump.log -Wait -Tail 50   # PowerShell
 
 ## Status
 
-Early scaffolding stage — see [TODO.md](./TODO.md) for current progress against the
-build order in [ARCHITECTURE.md §13](./ARCHITECTURE.md#13-build-order).
+All phases of the build order in [ARCHITECTURE.md §13](./ARCHITECTURE.md#13-build-order)
+are implemented and tested end-to-end: tools layer, single/portfolio/comparison graph,
+streaming, follow-up conversation (incl. clarification handling), frontend, and the eval
+harness.
