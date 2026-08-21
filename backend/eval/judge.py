@@ -6,19 +6,19 @@ from __future__ import annotations
 
 from typing import Literal
 
-import groq
+from google.genai import errors as genai_errors
 from pydantic import BaseModel, Field
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
-from app.llm.groq_client import get_chat_model
+from app.llm.gemini_client import get_judge_model
 
-# Groq's tool-call schema validation occasionally rejects its own model's output when the
-# model stringifies a numeric field (e.g. "3" instead of 3) — observed to be deterministic
-# per prompt at temperature=0 (so a same-input retry alone never helps), and specifically
-# tied to `int` fields with min/max constraints in the JSON schema. Score = Literal[1..5]
-# (an enum, not a bounded integer) avoids the pattern that was triggering it; the retry
-# below remains as a safety net for genuine transient API errors.
-_RETRYABLE = (groq.BadRequestError, groq.APIConnectionError, groq.APITimeoutError, groq.RateLimitError)
+# Score = Literal[1..5] (an enum, not a bounded integer) avoids a schema pattern that used
+# to trip up structured-output validation on some providers for constrained int fields.
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    return isinstance(exc, genai_errors.APIError) and exc.code in _RETRYABLE_STATUS
 
 Score = Literal[1, 2, 3, 4, 5]
 
@@ -55,9 +55,9 @@ def _build_prompt(question: str, query_type: str, final_report: str) -> str:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=6),
-    retry=retry_if_exception_type(_RETRYABLE),
+    retry=retry_if_exception(_is_retryable),
     reraise=True,
 )
 async def judge_report(question: str, query_type: str, final_report: str) -> JudgeScores:
-    llm = get_chat_model(temperature=0).with_structured_output(JudgeScores)
+    llm = get_judge_model().with_structured_output(JudgeScores)
     return await llm.ainvoke(_build_prompt(question, query_type, final_report))

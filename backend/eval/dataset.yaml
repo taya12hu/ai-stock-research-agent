@@ -4,10 +4,14 @@
 
 - id: single_aapl_direct
   question: "Analyze AAPL"
+  expected_query_type: single
+  expected_tickers: [AAPL]
   followups: []
 
 - id: single_nvda_natural_language
   question: "What is the financial health of NVIDIA?"
+  expected_query_type: single
+  expected_tickers: [NVDA]
   followups: []
 
 - id: single_thin_coverage_company
@@ -15,50 +19,77 @@
   # no news results" path (web_search.py's text-search fallback / empty-results handling)
   # under realistic conditions rather than a contrived one.
   question: "Analyze UNFI"
+  expected_query_type: single
+  expected_tickers: [UNFI]
   followups: []
 
 - id: comparison_two_stocks
   question: "Compare NVIDIA and AMD"
+  expected_query_type: comparison
+  expected_tickers: [NVDA, AMD]
   followups:
     - question: "Which of the two has the higher profit margin?"
       expected_path: answer
     - question: "Now also add Intel to this comparison"
       expected_path: add_ticker
+      expected_tickers: [NVDA, AMD, INTC]
 
 - id: comparison_three_stocks
   question: "Compare Apple, Microsoft, and Google"
+  expected_query_type: comparison
+  expected_tickers: [AAPL, MSFT, GOOGL]
   followups: []
 
 - id: portfolio_three_stocks
   question: "Analyze my portfolio of NVIDIA, Apple and Microsoft"
+  expected_query_type: portfolio
+  expected_tickers: [NVDA, AAPL, MSFT]
   followups: []
 
 - id: invalid_ticker_only
   question: "Analyze ZZZINVALIDTICKERXYZ"
+  # No valid ticker survives resolution -> resolve_tickers downgrades query_type to
+  # "single" even though nothing was actually researched (see router_node.py).
+  expected_query_type: single
+  expected_tickers: []
   followups: []
 
 - id: comparison_with_one_invalid_ticker
   question: "Compare Apple and ZZZINVALIDTICKERXYZ"
+  # Only one ticker survives resolution -> downgraded from "comparison" to "single"
+  # (test_router_drops_invalid_ticker_and_downgrades_query_type covers this at the
+  # pytest level with a mocked decision; this asserts the same behavior end-to-end).
+  expected_query_type: single
+  expected_tickers: [AAPL]
   followups: []
 
 - id: max_tickers_cap
   question: "Compare Apple, Microsoft, Google, Amazon, NVIDIA, and Tesla"
+  # Not asserting expected_tickers here: which 5 of the 6 survive the MAX_TICKERS cap
+  # depends on the LLM's own extraction order, not something to hardcode as "correct".
+  expected_query_type: comparison
   followups: []
 
 - id: followup_refresh_path
   question: "Analyze AAPL"
+  expected_query_type: single
+  expected_tickers: [AAPL]
   followups:
     - question: "Any fresh news on Apple today?"
       expected_path: refresh
 
 - id: followup_answer_path
   question: "Analyze AAPL"
+  expected_query_type: single
+  expected_tickers: [AAPL]
   followups:
     - question: "What is the trailing P/E ratio?"
       expected_path: answer
 
 - id: portfolio_natural_language
   question: "I hold Microsoft, NVIDIA, and Amazon stock — how is my portfolio doing?"
+  expected_query_type: portfolio
+  expected_tickers: [MSFT, NVDA, AMZN]
   followups: []
 
 # --- discovery detection: this app analyzes stocks it's given, it does not screen a
@@ -97,8 +128,11 @@
 - id: not_discovery_when_specific_stocks_given
   # Negative case: specific companies ARE named, so this must proceed as a normal
   # comparison — the discovery check must not misfire just because the question is
-  # framed as "which one is best".
+  # framed as "which one is best". expected_tickers uses bare symbols (no exchange
+  # suffix) since check_tickers_correct compares on the bare form either way.
   question: "I'm considering Sun Pharma, Cipla and Dr Reddy's. Which one has been affected most by recent negative news?"
+  expected_query_type: comparison
+  expected_tickers: [SUNPHARMA, CIPLA, DRREDDY]
   followups: []
 
 - id: discovery_followup_similar_stocks

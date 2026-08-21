@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -22,6 +23,14 @@ from typing import Any
 
 import yaml
 from langgraph.checkpoint.memory import InMemorySaver
+
+# Judge rationales and report text can contain characters (em-dashes, curly quotes) outside
+# Windows' default console codepage (cp1252) — printing them without this crashes the run
+# outright with UnicodeEncodeError partway through case 1, before any results are ever
+# written. UTF-8 is safe everywhere this actually runs (a terminal or a redirected file).
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
 
 from app.graph.build_graph import build_research_graph
 from app.graph.state import new_state
@@ -61,6 +70,8 @@ async def run_case(graph: Any, case: dict[str, Any]) -> dict[str, Any]:
             "result_snapshot": _snapshot(result),
             "elapsed_seconds": time.perf_counter() - start,
             "expected_discovery": case.get("expected_discovery"),
+            "expected_query_type": case.get("expected_query_type"),
+            "expected_tickers": case.get("expected_tickers"),
         }
     ]
 
@@ -74,6 +85,8 @@ async def run_case(graph: Any, case: dict[str, Any]) -> dict[str, Any]:
                 "elapsed_seconds": time.perf_counter() - f_start,
                 "expected_path": followup.get("expected_path"),
                 "expected_discovery": followup.get("expected_discovery"),
+                "expected_query_type": followup.get("expected_query_type"),
+                "expected_tickers": followup.get("expected_tickers"),
             }
         )
 

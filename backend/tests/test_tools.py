@@ -301,6 +301,75 @@ def test_get_technical_data_fetch_failure_message_is_clean(monkeypatch: pytest.M
     assert "stack-trace-like" not in str(exc_info.value)
 
 
+# --- yahoo_finance: indicator math is actually correct, not just in-bounds -------------
+#
+# test_get_technical_data_happy_path above only checks *plausibility* (RSI in [0,100],
+# volatility >= 0, ...) — it would pass even if the SMA/RSI/MACD formulas were subtly
+# wrong. These tests instead compute the expected values via a second, independent
+# implementation (plain Python loops over the mathematical definitions, not pandas
+# .rolling()/.ewm()) and assert the app's functions match it exactly, on a fixed,
+# reproducible price series (not random, so a failure is always the same failure).
+
+# 30 points, both up and down moves, so RSI exercises real gain/loss averaging rather
+# than the all-gains/no-losses edge case (which trivially returns 100.0 either way).
+_FIXED_CLOSES = [
+    100.0, 101.5, 100.8, 102.3, 103.1, 102.0, 104.5, 103.8, 105.2, 106.0,
+    105.1, 107.4, 106.9, 108.6, 107.8, 109.5, 110.2, 109.0, 111.3, 112.0,
+    110.8, 113.2, 114.0, 112.5, 115.1, 116.0, 114.7, 117.3, 118.0, 116.5,
+]
+
+
+def _reference_sma(values: list[float], window: int) -> float:
+    return round(sum(values[-window:]) / window, 2)
+
+
+def _reference_rsi(values: list[float], period: int = 14) -> float:
+    deltas = [values[i] - values[i - 1] for i in range(1, len(values))]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
+
+
+def _reference_ema_series(values: list[float], span: int) -> list[float]:
+    alpha = 2 / (span + 1)
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(v * alpha + out[-1] * (1 - alpha))
+    return out
+
+
+def _reference_macd(values: list[float]) -> dict[str, float]:
+    ema12 = _reference_ema_series(values, 12)
+    ema26 = _reference_ema_series(values, 26)
+    macd_line = [a - b for a, b in zip(ema12, ema26)]
+    signal_line = _reference_ema_series(macd_line, 9)
+    return {
+        "macd": round(macd_line[-1], 4),
+        "signal": round(signal_line[-1], 4),
+        "histogram": round(macd_line[-1] - signal_line[-1], 4),
+    }
+
+
+def test_sma_matches_independent_reference_implementation() -> None:
+    close = pd.Series(_FIXED_CLOSES)
+    assert yahoo_finance._sma(close, 20) == _reference_sma(_FIXED_CLOSES, 20)
+
+
+def test_rsi_matches_independent_reference_implementation() -> None:
+    close = pd.Series(_FIXED_CLOSES)
+    assert yahoo_finance._rsi(close, 14) == _reference_rsi(_FIXED_CLOSES, 14)
+
+
+def test_macd_matches_independent_reference_implementation() -> None:
+    close = pd.Series(_FIXED_CLOSES)
+    assert yahoo_finance._macd(close) == _reference_macd(_FIXED_CLOSES)
+
+
 # --- yahoo_finance: ticker resolution / exchange-suffix fallback (Twelve Data) --------
 
 
