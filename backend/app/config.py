@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
 
+    # Only used by eval/judge.py — a model from a different provider than the one that
+    # generated the report, so the eval harness isn't grading the same model's own output.
+    gemini_api_key: str = ""
+    gemini_judge_model: str = "gemini-3.6-flash"
+
     finnhub_api_key: str = ""
     twelvedata_api_key: str = ""
 

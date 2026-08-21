@@ -159,7 +159,7 @@ stock-research/
 │   │   ├── dataset.yaml                 # single/portfolio/comparison/edge/follow-up cases
 │   │   ├── run_eval.py
 │   │   ├── objective_checks.py          # structural/numeric/citation-integrity checks
-│   │   ├── judge.py                     # LLM-as-judge scoring rubric
+│   │   ├── judge.py                     # LLM-as-judge scoring rubric (Gemini, independent of Groq)
 │   │   └── results/                     # timestamped run outputs (gitignored)
 │   ├── tests/
 │   │   ├── test_health.py
@@ -434,26 +434,54 @@ Two distinct layers, serving two different audiences:
 
 ## 11. Evaluation Harness
 
-**Objective / structural checks** (deterministic — catch real bugs an LLM judge might
-rate fine anyway):
-- **Citation integrity** — every citation marker in the final report resolves to a real
-  `Finding.id` that was actually produced (catches fabricated citations mechanically).
-- **Citation coverage** — ratio of findings-with-a-source to total findings (~1.0 expected).
-- **Schema validation** — `AgentResult` / `Finding` / final report conform to shape.
-- **Numeric sanity** — computed indicators within plausible bounds (RSI ∈ [0,100], price
-  > 0, etc.).
-- **Partial-failure handling** — for deliberately-broken-ticker cases, the run still
-  completes with a non-empty `final_report` that explicitly notes the failure.
-- **Latency thresholds** — pass/fail against target SLAs (e.g. time-to-first-event < 2s;
-  total time scaled by ticker count).
+**Objective / structural checks** (`eval/objective_checks.py`; deterministic — catch real
+bugs an LLM judge might rate fine anyway). `hard` checks gate a case's overall pass/fail;
+`soft` checks are recorded but don't gate it, because what they verify is itself an LLM
+judgment call (query type, ticker extraction, follow-up routing) rather than a code-level
+guarantee — a mismatch there is a real, worth-reading finding, just not proof the run is
+broken the way a schema violation or a fabricated citation is:
+- **Schema** (hard) — `final_report`/`followup_answer`, `query_type`, and `tickers` are
+  present and well-typed.
+- **Citation integrity** (hard) — every citation marker in the final report resolves to a
+  real `Finding.id` that was actually produced (catches fabricated citations mechanically).
+- **Findings well-formed** (hard) — every finding has a non-blank `claim`/`evidence`/`id`,
+  and no agent exceeds `MAX_FINDINGS_PER_AGENT`.
+- **Total-failure explicit** (hard) — if every agent failed for a ticker, the deterministic
+  no-LLM-call fallback message is present, not silently omitted.
+- **No fabricated discovery tickers** (hard, only on `expected_discovery`-tagged turns) —
+  no *new* ticker appears versus what the session already had before that turn ran (a diff
+  against the prior turn, not just "is the list non-empty" — a follow-up session's ticker
+  list is never empty to begin with, so a bare non-empty check would false-positive on
+  every discovery-flavored follow-up regardless of what actually happened).
+- **Query type correct** (soft, only on `expected_query_type`-tagged turns) — the
+  classified `single`/`portfolio`/`comparison` matches what the dataset expects.
+- **Tickers correct** (soft, only on `expected_tickers`-tagged turns) — the extracted
+  tickers match what the dataset expects, compared as bare symbols (`TCS` vs. `TCS.NS`)
+  and as a set (order-independent).
+- **Follow-up path correct** (soft, only on `expected_path`-tagged turns) — the classified
+  `answer`/`refresh`/`add_ticker`/etc. matches what the dataset expects.
+- **Partial-failure mentioned** (soft) — when only some agents failed, the report
+  acknowledges the gap (LLM wording, not a guaranteed string).
+- **Latency** (soft) — total graph time (the harness runs in-process, bypassing HTTP, so
+  this is compute time, not time-to-first-SSE-event) against a budget scaled by ticker count.
 
-**LLM-as-judge** (graded, for what can't be checked mechanically): a separate Groq call
-scores each run 1-5 on grounding, relevance, completeness across the three research
-dimensions, and (for comparisons) whether the output is a genuine structured comparison
-rather than three reports stapled together.
+Indicator math itself (SMA/RSI/MACD) is verified separately, in `backend/tests/test_tools.py`,
+against a second, independent implementation of the same formulas on a fixed price series
+— not by this harness, since it runs against live, changing market data and can't assert
+an exact expected number the way a fixed synthetic series can.
 
-- `eval/dataset.yaml`: ~12-15 cases spanning all three query types, an invalid ticker, a
-  thin-news-coverage company, and a follow-up scenario (including the "add a ticker" path).
+**LLM-as-judge** (graded, for what can't be checked mechanically): a Gemini call
+(`gemini_client.get_judge_model`) — deliberately a different provider than Groq, which
+generates the reports being graded, so the harness isn't having a model grade its own
+output — scores each run 1-5 on grounding, relevance, completeness across the three
+research dimensions, and (for comparisons) whether the output is a genuine structured
+comparison rather than three reports stapled together. Requires `GEMINI_API_KEY`; if
+unset, judge scoring fails per-case (recorded in that case's `judge` field) without
+aborting the run, since the objective checks above don't depend on it.
+
+- `eval/dataset.yaml`: 18 cases spanning all three query types, an invalid ticker, a
+  thin-news-coverage company, discovery/clarification edge cases, and follow-up scenarios
+  (refresh, add-ticker, answer-from-context).
 - `eval/run_eval.py` runs the graph in-process (bypassing HTTP for speed), writes
   timestamped JSON to `eval/results/`; a diff script compares two runs (baseline vs. after
   a change) across both objective checks and judge scores.
@@ -463,7 +491,8 @@ rather than three reports stapled together.
 - **Backend**: Python 3.11+, FastAPI, `uvicorn`, LangGraph, `langchain-groq`, `requests`
   (Finnhub + Twelve Data), `ddgs` (DuckDuckGo), `pandas`, `tenacity` (retries),
   `cachetools` (TTL caching), `pydantic`, `pydantic-settings`, `python-dotenv`, SQLite
-  (checkpointer + event log). Config via `.env` (`GROQ_API_KEY`, `FINNHUB_API_KEY`,
+  (checkpointer + event log). `langchain-google-genai` is eval-only (§11's independent
+  judge). Config via `.env` (`GROQ_API_KEY`, `FINNHUB_API_KEY`,
   `TWELVEDATA_API_KEY`, model names, timeouts, `MAX_TICKERS`) — never committed
   (`.env.example` documents required keys).
 - **Frontend**: Vite + React + TypeScript, native `EventSource` (SSE, reconnect via

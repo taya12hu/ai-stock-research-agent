@@ -47,19 +47,29 @@ def check_schema(snapshot: dict[str, Any]) -> CheckResult:
     return CheckResult("schema", ok, detail)
 
 
-def check_no_fabricated_discovery_tickers(turn: dict[str, Any]) -> CheckResult | None:
+def check_no_fabricated_discovery_tickers(turn: dict[str, Any], previous_tickers: list[str]) -> CheckResult | None:
     """For a turn tagged `expected_discovery: true` in the dataset — a request this app
     can't fulfill because it would require screening a market/sector for candidates —
     the only hard safety property that matters is that no ticker got fabricated to fill
     the gap. Whether the model produced a discovery-limitation reply or fell back to one
     clarifying question, both are safe; inventing a candidate company is the one
     outcome this must never allow, mirroring what `check_citation_integrity` guards
-    against on the report side."""
+    against on the report side.
+
+    Compares against `previous_tickers` (the session's tickers *before* this turn ran),
+    not just "is the current list non-empty" — a follow-up turn's session already has
+    tickers from earlier turns by design, so a bare non-empty check false-positives on
+    every discovery-flavored follow-up regardless of what actually happened (observed
+    live: a turn whose classification call failed on an unrelated rate limit and left
+    the session's existing ticker untouched still failed this check under the old logic).
+    The real safety property is "no *new* ticker appeared," which requires the diff.
+    """
     if not turn.get("expected_discovery"):
         return None
     tickers = turn["result_snapshot"].get("tickers") or []
-    ok = not tickers
-    detail = "no ticker fabricated" if ok else f"fabricated ticker(s) for an unsupported discovery request: {tickers}"
+    fabricated = set(tickers) - set(previous_tickers)
+    ok = not fabricated
+    detail = "no new ticker fabricated" if ok else f"fabricated ticker(s) for an unsupported discovery request: {sorted(fabricated)}"
     return CheckResult("no_fabricated_discovery_tickers", ok, detail)
 
 
@@ -131,6 +141,43 @@ def check_followup_path(turn: dict[str, Any]) -> CheckResult | None:
     return CheckResult("followup_path", ok, f"expected {expected!r}, got {actual!r}", hard=False)
 
 
+def check_query_type(turn: dict[str, Any]) -> CheckResult | None:
+    """Only fires for a turn tagged `expected_query_type` in the dataset. `hard=False`,
+    same as `check_followup_path` — classifying single/portfolio/comparison from free
+    text is a judgment call the router makes, not a code-level guarantee, so a mismatch
+    here is a real (informational) finding, not proof the run is broken.
+    """
+    expected = turn.get("expected_query_type")
+    if not expected:
+        return None
+    actual = turn["result_snapshot"].get("query_type")
+    ok = actual == expected
+    return CheckResult("query_type", ok, f"expected {expected!r}, got {actual!r}", hard=False)
+
+
+def _bare(ticker: str) -> str:
+    """Strips an exchange suffix ('TCS.NS' -> 'TCS') so a dataset can list the bare
+    symbol a user would actually type, regardless of which suffix `aresolve_ticker`
+    ends up resolving it to (mirrors `followup_router_node.py`'s own `_bare` helper)."""
+    return ticker.split(".")[0].upper()
+
+
+def check_tickers_correct(turn: dict[str, Any]) -> CheckResult | None:
+    """Only fires for a turn tagged `expected_tickers` in the dataset. `hard=False` for
+    the same reason as `check_query_type` — ticker extraction from natural language is
+    an LLM judgment call. Compares bare symbols in either order, not an exact list, so
+    extraction order and exchange suffixes don't cause false negatives."""
+    expected = turn.get("expected_tickers")
+    if not expected:
+        return None
+    actual = turn["result_snapshot"].get("tickers") or []
+    actual_bare = {_bare(t) for t in actual}
+    expected_bare = {_bare(t) for t in expected}
+    ok = actual_bare == expected_bare
+    detail = "tickers match" if ok else f"expected {sorted(expected_bare)}, got {sorted(actual_bare)}"
+    return CheckResult("tickers_correct", ok, detail, hard=False)
+
+
 def check_latency(elapsed_seconds: float, ticker_count: int) -> CheckResult:
     budget = 30 + 20 * max(ticker_count, 1)
     ok = elapsed_seconds <= budget
@@ -147,12 +194,20 @@ def run_all_checks(turns: list[dict[str, Any]]) -> list[CheckResult]:
         check_partial_failure_mentioned(final_snapshot),
         check_latency(turns[-1]["elapsed_seconds"], len(final_snapshot.get("tickers") or [])),
     ]
-    for turn in turns:
-        discovery_check = check_no_fabricated_discovery_tickers(turn)
+    for i, turn in enumerate(turns):
+        previous_tickers = turns[i - 1]["result_snapshot"].get("tickers") or [] if i > 0 else []
+        discovery_check = check_no_fabricated_discovery_tickers(turn, previous_tickers)
         if discovery_check:
             checks.append(discovery_check)
     for turn in turns[1:]:
         followup_check = check_followup_path(turn)
         if followup_check:
             checks.append(followup_check)
+    for turn in turns:
+        query_type_check = check_query_type(turn)
+        if query_type_check:
+            checks.append(query_type_check)
+        tickers_check = check_tickers_correct(turn)
+        if tickers_check:
+            checks.append(tickers_check)
     return checks
