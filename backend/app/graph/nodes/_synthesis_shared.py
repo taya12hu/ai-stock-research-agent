@@ -81,5 +81,8 @@ def citation_instruction(findings: list[Finding]) -> str:
     finding_ids = ", ".join(f["id"] for f in findings)
     return (
         "When you state a specific fact, cite it inline using its bracket id exactly as "
-        f"given (e.g. [{findings[0]['id']}]) — only use ids from this exact list: {finding_ids}."
+        f"given (e.g. [{findings[0]['id']}]) — only use ids from this exact list: {finding_ids}. "
+        "Square brackets are reserved for these citation ids only — never use them for anything "
+        "else (e.g. don't write \"[Unavailable]\" or \"[N/A]\" to mark missing data; say it in "
+        "plain prose instead, like \"technical data is unavailable\")."
     )
