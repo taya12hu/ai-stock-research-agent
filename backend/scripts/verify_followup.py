@@ -1,5 +1,5 @@
 """Manual/dev verification script for the follow-up conversation flow — exercises all
-three follow-up paths (answer / refresh / add_ticker) against real Yahoo Finance,
+recall and research lanes across turns against real market-data providers,
 DuckDuckGo, and Groq calls, using a real checkpointer so state persists across turns
 exactly as the API layer does.
 

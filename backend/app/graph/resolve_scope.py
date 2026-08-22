@@ -17,7 +17,7 @@ from app.config import settings
 from app.graph.intent import TurnIntent
 from app.graph.plan_turn import ScopeResolution
 from app.logging_config import get_logger, log_event
-from app.tools.yahoo_finance import aresolve_ticker
+from app.tools.market_data import aresolve_ticker
 
 logger = get_logger("app.graph.resolve_scope")
 

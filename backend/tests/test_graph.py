@@ -28,9 +28,9 @@ from app.graph.nodes._shared import LLMFinding, NodeAnalysis
 from app.graph.nodes.news_node import NewsAnalysis, NewsLLMFinding
 from app.graph.session import AGENT_NAMES, new_session_state
 from app.llm.errors import LLMAnalysisError
-from app.tools.errors import WebSearchError, YahooFinanceError
+from app.tools.errors import WebSearchError, MarketDataError
 from app.tools.web_search import SearchResult
-from app.tools.yahoo_finance import FundamentalsData, ResolvedTicker, TechnicalData
+from app.tools.market_data import FundamentalsData, ResolvedTicker, TechnicalData
 
 FAKE_FUNDAMENTALS = FundamentalsData(
     ticker="AAPL", name="Apple Inc.", sector="Technology", industry="Consumer Electronics",
@@ -183,7 +183,7 @@ async def test_partial_failure_is_disclosed_deterministically(monkeypatch: pytes
     exists whether the model mentions it or not — and the harness can assert on it.
     """
     _mock_all_tools(monkeypatch)
-    monkeypatch.setattr(technical_mod, "aget_technical_data", _async_raise(YahooFinanceError("timed out")))
+    monkeypatch.setattr(technical_mod, "aget_technical_data", _async_raise(MarketDataError("timed out")))
 
     result = await _run(monkeypatch, _subjects("AAPL"), {"AAPL": "AAPL"})
     text = result["turn"]["output"]["text"]
@@ -217,8 +217,8 @@ async def test_every_agent_failing_produces_a_plain_reply_not_a_report_shell(
     """A-10 end to end: nothing usable came back, so a "Research Report" card would present
     a failure as a completed deliverable.
     """
-    monkeypatch.setattr(fundamentals_mod, "aget_fundamentals", _async_raise(YahooFinanceError("down")))
-    monkeypatch.setattr(technical_mod, "aget_technical_data", _async_raise(YahooFinanceError("down")))
+    monkeypatch.setattr(fundamentals_mod, "aget_fundamentals", _async_raise(MarketDataError("down")))
+    monkeypatch.setattr(technical_mod, "aget_technical_data", _async_raise(MarketDataError("down")))
     monkeypatch.setattr(news_mod, "asearch_news", _async_raise(WebSearchError("down")))
 
     result = await _run(monkeypatch, _subjects("AAPL"), {"AAPL": "AAPL"})
@@ -236,8 +236,8 @@ async def test_news_returning_no_articles_does_not_count_as_usable(
     `status == "ok"` was the old usability test, so this produced a full report — verdict
     line included — from two error strings and a "no news found".
     """
-    monkeypatch.setattr(fundamentals_mod, "aget_fundamentals", _async_raise(YahooFinanceError("down")))
-    monkeypatch.setattr(technical_mod, "aget_technical_data", _async_raise(YahooFinanceError("down")))
+    monkeypatch.setattr(fundamentals_mod, "aget_fundamentals", _async_raise(MarketDataError("down")))
+    monkeypatch.setattr(technical_mod, "aget_technical_data", _async_raise(MarketDataError("down")))
     monkeypatch.setattr(news_mod, "asearch_news", _async_return([]))
 
     result = await _run(monkeypatch, _subjects("AAPL"), {"AAPL": "AAPL"})

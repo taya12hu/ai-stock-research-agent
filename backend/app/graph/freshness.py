@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 from app.graph.state import AgentName
 
-# Matches `_CACHE_TTL_SECONDS` in tools/yahoo_finance.py and tools/web_search.py. This is
+# Matches `_CACHE_TTL_SECONDS` in tools/market_data.py and tools/web_search.py. This is
 # a hard floor for every TTL below, not a coincidence: the tool layer hands back a cached
 # object for this long, so a freshness window shorter than it would refetch and receive
 # byte-identical data — work and latency for provably zero new information.

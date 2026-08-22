@@ -1,36 +1,32 @@
 """Market data access: fundamentals via Finnhub, price history via Twelve Data.
 
-Neither provider is Yahoo/`yfinance` anymore, despite the filename (kept for now to
-limit the diff — see git history for the full story). Yahoo Finance's unofficial API
-actively blocks requests from cloud/datacenter IPs (confirmed via YFRateLimitError in
-production on Render), badly enough that retries didn't fix it. Ticker resolution and
-technicals moved to Twelve Data first; fundamentals (`get_fundamentals`,
-`get_company_name`, `ticker_exists`) followed onto Finnhub once a key was available.
-`yfinance` itself is no longer imported.
+The project originally used `yfinance` for both. Yahoo's unofficial API turned out to
+block requests from cloud/datacenter IPs — confirmed in production on Render, badly
+enough that retries never helped, because an IP-class block is permanent rather than
+transient. Ticker resolution and technicals moved to Twelve Data first, fundamentals
+followed onto Finnhub once a key was available. `yfinance` is no longer a dependency.
 
-Design notes (see ARCHITECTURE.md §6, §10 — written for the yfinance era, now stale):
-- Both providers signal "invalid ticker" the same way yfinance did: HTTP 200 with an
-  empty/near-empty body, not an exception (confirmed live: Finnhub's `/stock/profile2`
-  returns `{}` for a bad symbol; Twelve Data returns `status: "error"`). Validity is
-  therefore checked on the *shape of the returned data*, not on exceptions, and that
-  contract is normalized across both providers so callers don't need to special-case
-  which one a function talks to.
-- Retries only apply to transient network errors (and Twelve Data rate limits), never
-  to "ticker doesn't exist" — a 404 there is permanent, not transient, so retrying it
-  would only burn through the free-tier rate limit for nothing.
-- Every public fetch function is wrapped with a short TTL cache (avoids re-hitting the
-  provider repeatedly, e.g. during eval runs) and, on the async side, a hard timeout.
-- Sync core + `asyncio.to_thread` async wrappers, since neither underlying HTTP call is
-  async and agent nodes run in an async LangGraph.
-- A bare symbol can silently collide with the wrong company (observed on Yahoo: bare
-  "TCS" resolved to the wrong, delisted company — Tata Consultancy Services is actually
-  "TCS.NS"). `resolve_ticker`/`aresolve_ticker` handles this by requiring real price
-  history for the bare symbol, falling back to well-known non-US exchange suffixes on
-  the same symbol when it doesn't hold up — no per-company lookup table.
-- Finnhub's basic-financials numbers (margins, growth, yield, ROE) are percentages
-  (e.g. `netProfitMarginTTM: 27.62` means 27.6%); they're divided by 100 here to match
-  the decimal-fraction convention `FundamentalsData` already used under yfinance (e.g.
-  `profitMargins: 0.276`), so nothing downstream needs to know the provider changed.
+Design notes:
+- Both providers signal "invalid ticker" with HTTP 200 and an empty or near-empty body
+  rather than an error: Finnhub's `/stock/profile2` returns `{}` for a bad symbol, Twelve
+  Data returns `status: "error"`. Validity is therefore checked on the *shape of the
+  returned data*, not on exceptions, and that contract is normalised across both providers
+  so callers never need to know which one a function talks to.
+- Retries apply only to transient network errors and Twelve Data rate limits, never to
+  "ticker doesn't exist" — that is permanent, and retrying it would burn free-tier quota
+  for a guaranteed identical failure.
+- Every public fetch is wrapped in a short TTL cache (which also stops eval runs from
+  hammering the provider) and, on the async side, a hard timeout.
+- Sync core with `asyncio.to_thread` wrappers, since neither provider's HTTP client is
+  async while the agent nodes run in an async graph.
+- A bare symbol can silently resolve to the wrong company — observed live: bare "TCS"
+  matched a delisted company, while Tata Consultancy Services is actually "TCS.NS".
+  `resolve_ticker` handles this by requiring real price history for the bare symbol and
+  falling back to well-known non-US exchange suffixes when it doesn't hold up. No
+  per-company lookup table.
+- Finnhub's basic-financials figures (margins, growth, yield, ROE) are percentages —
+  `netProfitMarginTTM: 27.62` means 27.6% — and are divided by 100 here so
+  `FundamentalsData` keeps the decimal-fraction convention its consumers expect.
 """
 
 from __future__ import annotations
@@ -48,9 +44,9 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from app.config import settings
 from app.logging_config import get_logger, log_event, trace
-from app.tools.errors import YahooFinanceError
+from app.tools.errors import MarketDataError
 
-logger = get_logger("app.tools.yahoo_finance")
+logger = get_logger("app.tools.market_data")
 
 _TWELVEDATA_BASE_URL = "https://api.twelvedata.com"
 _FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
@@ -326,18 +322,6 @@ def _fifty_two_week_range(history: pd.DataFrame) -> tuple[float, float] | None:
 # --- public sync API -----------------------------------------------------------------
 
 
-def ticker_exists(ticker: str) -> bool:
-    try:
-        info = _fetch_info(ticker.upper())
-    except Exception as exc:  # noqa: BLE001 - any fetch failure => can't confirm existence
-        log_event(
-            logger, "ticker_exists check failed", level=logging.WARNING,
-            ticker=ticker, error=str(exc),
-        )
-        return False
-    return _has_real_data(info)
-
-
 def get_company_name(ticker: str) -> str | None:
     """The company's display name, purely as a web-search disambiguation aid: a bare
     ticker or the short word a company name reduces to (e.g. "TITAN" for Titan Company
@@ -375,10 +359,10 @@ def get_fundamentals(ticker: str) -> FundamentalsData:
             logger, "fundamentals fetch failed", level=logging.WARNING,
             ticker=ticker, error=str(exc),
         )
-        raise YahooFinanceError(f"Unable to fetch fundamentals data for {ticker} right now.") from exc
+        raise MarketDataError(f"Unable to fetch fundamentals data for {ticker} right now.") from exc
 
     if not _has_real_data(info):
-        raise YahooFinanceError(f"no fundamentals data for {ticker} (ticker may be invalid)")
+        raise MarketDataError(f"no fundamentals data for {ticker} (ticker may be invalid)")
 
     profile, quote, metric = info["profile"], info["quote"], info["metric"]
     market_cap_millions = profile.get("marketCapitalization")
@@ -414,10 +398,10 @@ def get_technical_data(ticker: str, period: str = "1y") -> TechnicalData:
             logger, "price history fetch failed", level=logging.WARNING,
             ticker=ticker, error=str(exc),
         )
-        raise YahooFinanceError(f"Unable to fetch price history for {ticker} right now.") from exc
+        raise MarketDataError(f"Unable to fetch price history for {ticker} right now.") from exc
 
     if history is None or history.empty:
-        raise YahooFinanceError(f"no price history for {ticker} (ticker may be invalid)")
+        raise MarketDataError(f"no price history for {ticker} (ticker may be invalid)")
 
     close = history["Close"]
     macd = _macd(close)
@@ -442,14 +426,7 @@ def get_technical_data(ticker: str, period: str = "1y") -> TechnicalData:
 # --- public async API (used by agent nodes) -------------------------------------------
 
 
-@trace("app.tools.yahoo_finance")
-async def aticker_exists(ticker: str) -> bool:
-    return await asyncio.wait_for(
-        asyncio.to_thread(ticker_exists, ticker), timeout=settings.request_timeout_seconds
-    )
-
-
-@trace("app.tools.yahoo_finance")
+@trace("app.tools.market_data")
 async def aget_company_name(ticker: str) -> str | None:
     try:
         return await asyncio.wait_for(
@@ -459,7 +436,7 @@ async def aget_company_name(ticker: str) -> str | None:
         return None
 
 
-@trace("app.tools.yahoo_finance")
+@trace("app.tools.market_data")
 async def aresolve_ticker(ticker: str) -> ResolvedTicker:
     # Tries up to 3 symbol variants sequentially (bare + 2 suffixes) — a longer timeout
     # than a single fetch is deliberate here.
@@ -468,19 +445,19 @@ async def aresolve_ticker(ticker: str) -> ResolvedTicker:
     )
 
 
-@trace("app.tools.yahoo_finance")
+@trace("app.tools.market_data")
 async def aget_fundamentals(ticker: str) -> FundamentalsData:
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(get_fundamentals, ticker), timeout=settings.request_timeout_seconds
         )
     except asyncio.TimeoutError as exc:
-        raise YahooFinanceError(
+        raise MarketDataError(
             f"fundamentals fetch for {ticker} timed out after {settings.request_timeout_seconds}s"
         ) from exc
 
 
-@trace("app.tools.yahoo_finance")
+@trace("app.tools.market_data")
 async def aget_technical_data(ticker: str, period: str = "1y") -> TechnicalData:
     try:
         return await asyncio.wait_for(
@@ -488,6 +465,6 @@ async def aget_technical_data(ticker: str, period: str = "1y") -> TechnicalData:
             timeout=settings.request_timeout_seconds,
         )
     except asyncio.TimeoutError as exc:
-        raise YahooFinanceError(
+        raise MarketDataError(
             f"technical data fetch for {ticker} timed out after {settings.request_timeout_seconds}s"
         ) from exc

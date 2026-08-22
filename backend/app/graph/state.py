@@ -15,7 +15,7 @@ AGENT_NAMES: tuple[AgentName, ...] = ("fundamentals", "technical", "news")
 
 
 class Source(TypedDict):
-    type: Literal["yahoo_finance", "web"]
+    type: Literal["market_data", "web"]
     label: str
     url: str | None
     # What this source's own data is dated to. Deliberately distinct from a cell's

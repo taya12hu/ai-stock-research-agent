@@ -11,8 +11,8 @@ from app.graph.session import SessionState
 from app.graph.state import Finding, Source
 from app.llm.errors import LLMAnalysisError
 from app.logging_config import get_logger, log_event
-from app.tools.errors import YahooFinanceError
-from app.tools.yahoo_finance import TechnicalData, aget_technical_data
+from app.tools.errors import MarketDataError
+from app.tools.market_data import TechnicalData, aget_technical_data
 
 logger = get_logger("app.graph.nodes.technical")
 
@@ -59,7 +59,7 @@ async def technical_node(state: SessionState) -> dict:
 
     try:
         data = await aget_technical_data(ticker)
-    except YahooFinanceError as exc:
+    except MarketDataError as exc:
         log_event(logger, "technical data fetch failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
         return node_failed(ticker, "technical", str(exc))
 
@@ -81,11 +81,10 @@ async def technical_node(state: SessionState) -> dict:
         return node_failed(ticker, "technical", str(exc))
 
     source = Source(
-        type="yahoo_finance",
+        type="market_data",
         label=f"{ticker} price history (Twelve Data)",
-        # Same rationale as fundamentals_node's Source — the public quote page, not the
-        # literal token-authed API endpoint (Twelve Data) actually called, but a real,
-        # verifiable link showing the same underlying price data.
+        # Same rationale as fundamentals_node's Source: a public reference page a reader
+        # can check the same price data against, not the token-authed endpoint called.
         url=f"https://finance.yahoo.com/quote/{ticker}",
         as_of=data.as_of,
     )

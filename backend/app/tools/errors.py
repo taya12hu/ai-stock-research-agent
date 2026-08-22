@@ -11,7 +11,7 @@ class ToolError(Exception):
     """Base class for tool-layer errors."""
 
 
-class YahooFinanceError(ToolError):
+class MarketDataError(ToolError):
     """Raised when fundamentals/price data can't be fetched or parsed for a ticker."""
 
 

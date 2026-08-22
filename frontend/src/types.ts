@@ -6,7 +6,7 @@ export type QueryType = "single" | "portfolio" | "comparison";
 export type AgentStatus = "queued" | "running" | "ok" | "failed";
 
 export interface Source {
-  type: "yahoo_finance" | "web";
+  type: "market_data" | "web";
   label: string;
   url: string | null;
   as_of: string;

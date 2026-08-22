@@ -17,7 +17,7 @@ from app.llm.errors import LLMAnalysisError
 from app.logging_config import get_logger, log_event
 from app.tools.errors import WebSearchError
 from app.tools.web_search import SearchResult, asearch_news
-from app.tools.yahoo_finance import aget_company_name
+from app.tools.market_data import aget_company_name
 
 logger = get_logger("app.graph.nodes.news")
 
@@ -76,8 +76,8 @@ def _finding_source(article: SearchResult | None) -> Source:
 async def news_node(state: SessionState) -> dict:
     ticker = target_ticker(state)
     # `ticker` may carry a resolved exchange suffix (e.g. "TCS.NS" — see
-    # `aresolve_ticker`); strip it for the search query, since a suffix helps Yahoo
-    # Finance disambiguate a symbol but only hurts a general web search's relevance.
+    # `aresolve_ticker`); strip it for the search query, since a suffix helps the market
+    # data provider disambiguate a symbol but only hurts a general web search's relevance.
     search_term = ticker.split(".")[0]
     # The bare ticker/word alone is often ambiguous (e.g. "TITAN" matches Titan Company
     # Limited, Titan Mining Corp, and Titan International indiscriminately) — the

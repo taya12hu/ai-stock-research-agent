@@ -17,7 +17,7 @@ from app.graph.nodes.plan_node import MAX_CLARIFY_ATTEMPTS, plan_node
 from app.graph.resolve_scope import resolve_scope
 from app.graph.session import AGENT_NAMES, SessionState, fresh_turn
 from app.llm.errors import RATE_LIMIT_MESSAGE, LLMAnalysisError
-from app.tools.yahoo_finance import ResolvedTicker
+from app.tools.market_data import ResolvedTicker
 
 
 def _state(

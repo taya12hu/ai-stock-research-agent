@@ -23,13 +23,7 @@ from __future__ import annotations
 from app import replies
 from app.graph.freshness import is_usable
 from app.graph.nodes._synthesis_shared import AGENT_LABELS
-from app.graph.session import (
-    AgentName,
-    ConversationMessage,
-    SessionState,
-    TurnOutput,
-    TurnPlan,
-)
+from app.graph.session import ConversationMessage, SessionState, TurnOutput, TurnPlan
 from app.logging_config import get_logger, log_event
 
 logger = get_logger("app.graph.nodes.emit")
@@ -147,10 +141,3 @@ async def emit_node(state: SessionState) -> dict:
         kind=turn["kind"], output_kind=final["kind"], scope=turn["scope"],
     )
     return update
-
-
-def specialist_agents(turn: TurnPlan) -> list[AgentName]:
-    """Which agents this turn dispatched — used by the API layer to derive progress
-    events without re-deriving the fan-out rule.
-    """
-    return sorted({cell["agent"] for cell in turn["fetch"]})

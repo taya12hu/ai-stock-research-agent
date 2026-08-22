@@ -35,7 +35,7 @@ for _stream in (sys.stdout, sys.stderr):
 from app.graph.build_graph import build_research_graph
 from app.graph.session import new_session_state
 from eval.judge import judge_report
-from eval.objective_checks import CheckResult, run_all_checks
+from eval.objective_checks import run_all_checks
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 DATASET_PATH = Path(__file__).resolve().parent / "dataset.yaml"

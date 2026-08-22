@@ -7,7 +7,7 @@ from app.graph.state import Finding, Source
 def _finding(id: str, label: str, url: str | None = None, as_of: str = "2026-08-19T00:00:00Z") -> Finding:
     return Finding(
         id=id, claim="claim", evidence="evidence",
-        source=Source(type="yahoo_finance", label=label, url=url, as_of=as_of),
+        source=Source(type="market_data", label=label, url=url, as_of=as_of),
     )
 
 
@@ -17,11 +17,11 @@ def test_sources_section_merges_findings_that_share_the_same_source() -> None:
     read as 5 independent fundamentals sources and 5 independent technical sources when
     it was really one fetch each."""
     findings = [
-        _finding("AAPL-fundamentals-1", "AAPL fundamentals (Yahoo Finance)"),
-        _finding("AAPL-fundamentals-2", "AAPL fundamentals (Yahoo Finance)"),
-        _finding("AAPL-fundamentals-3", "AAPL fundamentals (Yahoo Finance)"),
-        _finding("AAPL-technical-1", "AAPL price history (Yahoo Finance)", as_of="2026-08-18T00:00:00-04:00"),
-        _finding("AAPL-technical-2", "AAPL price history (Yahoo Finance)", as_of="2026-08-18T00:00:00-04:00"),
+        _finding("AAPL-fundamentals-1", "AAPL fundamentals (Finnhub)"),
+        _finding("AAPL-fundamentals-2", "AAPL fundamentals (Finnhub)"),
+        _finding("AAPL-fundamentals-3", "AAPL fundamentals (Finnhub)"),
+        _finding("AAPL-technical-1", "AAPL price history (Twelve Data)", as_of="2026-08-18T00:00:00-04:00"),
+        _finding("AAPL-technical-2", "AAPL price history (Twelve Data)", as_of="2026-08-18T00:00:00-04:00"),
     ]
 
     section = sources_section(findings)

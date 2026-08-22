@@ -11,8 +11,8 @@ from app.graph.session import SessionState
 from app.graph.state import Finding, Source
 from app.llm.errors import LLMAnalysisError
 from app.logging_config import get_logger, log_event
-from app.tools.errors import YahooFinanceError
-from app.tools.yahoo_finance import FundamentalsData, aget_fundamentals
+from app.tools.errors import MarketDataError
+from app.tools.market_data import FundamentalsData, aget_fundamentals
 
 logger = get_logger("app.graph.nodes.fundamentals")
 
@@ -66,7 +66,7 @@ async def fundamentals_node(state: SessionState) -> dict:
 
     try:
         data = await aget_fundamentals(ticker)
-    except YahooFinanceError as exc:
+    except MarketDataError as exc:
         log_event(logger, "fundamentals data fetch failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
         return node_failed(ticker, "fundamentals", str(exc))
 
@@ -88,12 +88,13 @@ async def fundamentals_node(state: SessionState) -> dict:
         return node_failed(ticker, "fundamentals", str(exc))
 
     source = Source(
-        type="yahoo_finance",
+        type="market_data",
         label=f"{ticker} fundamentals (Finnhub)",
-        # Not literally the page this data was fetched from — it's fetched from
-        # Finnhub's token-authed API, which has no public per-ticker page to link to —
-        # but Yahoo Finance's public quote page covers the same categories of figures
-        # and is a real link a user can actually click through and verify against.
+        # A verification reference, not the fetch URL: Finnhub's API is token-authed
+        # and has no public per-ticker page, so there is nothing to link to directly.
+        # The label names the real provider; this gives the reader somewhere to check
+        # the same figures. Swap or drop it if that distinction ever needs to be
+        # sharper than the label alone makes it.
         url=f"https://finance.yahoo.com/quote/{ticker}",
         as_of=data.as_of,
     )

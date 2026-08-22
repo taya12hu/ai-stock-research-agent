@@ -1,5 +1,5 @@
 """Manual/dev verification script for the full research graph (router + dynamic
-multi-ticker fan-out + type-aware synthesis) — runs against real Yahoo Finance,
+multi-ticker fan-out + rendering) — runs against real market-data providers,
 DuckDuckGo, and Groq calls (not mocked; see tests/test_graph.py for the mocked/
 automated version).
 
