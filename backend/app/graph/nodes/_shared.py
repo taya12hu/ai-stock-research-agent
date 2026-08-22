@@ -16,7 +16,8 @@ import groq
 from pydantic import BaseModel, Field
 from tenacity import retry, retry_if_exception, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from app.graph.state import AgentName, AgentResult, Finding, Source
+from app.graph.session import cell_failed, cell_ok
+from app.graph.state import AgentName, Finding, Source
 from app.llm.errors import RATE_LIMIT_MESSAGE, LLMAnalysisError, is_rate_limited
 from app.llm.groq_client import get_chat_model
 from app.logging_config import get_logger, log_event
@@ -98,17 +99,28 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def node_result(ticker: str, agent: AgentName, result: AgentResult) -> dict:
-    """Every specialist node's return value, in one place — wraps an `AgentResult` into
-    the state update and stamps when this (ticker, agent) attempt completed, success or
-    failure alike. That timestamp (`per_ticker_fetched_at`, see state.py) is what lets a
-    follow-up's "answer from context" path tell fresh results from stale ones instead of
-    trusting a single classification LLM call's guess about whether a refresh is needed.
+def target_ticker(state: dict) -> str:
+    """The one ticker this specialist instance was dispatched for.
+
+    Fan-out narrows `turn.scope` to a single entry per `Send`, so a node never has to know
+    how many branches exist or which of them it is.
     """
-    return {
-        "per_ticker_results": {ticker: {agent: result}},
-        "per_ticker_fetched_at": {ticker: {agent: now_iso()}},
-    }
+    return state["turn"]["scope"][0]
+
+
+def node_ok(ticker: str, agent: AgentName, summary: str, findings: list[Finding]) -> dict:
+    return {"researched": {ticker: {agent: cell_ok(summary, findings, now_iso())}}}
+
+
+def node_failed(ticker: str, agent: AgentName, error: str) -> dict:
+    """A failure is a stamped result, not an absence.
+
+    `fetched_at` is written here exactly as it is on success, so "we tried and it failed"
+    stays distinguishable from "never attempted" — which is what lets the freshness
+    predicate retry a failed cell instead of reading three fresh timestamps and concluding
+    the ticker is perfectly current (A-03).
+    """
+    return {"researched": {ticker: {agent: cell_failed(error, now_iso())}}}
 
 
 def build_findings(

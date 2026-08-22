@@ -13,7 +13,7 @@ import asyncio
 import uuid
 
 from app.graph.build_graph import build_research_graph
-from app.graph.state import new_state
+from app.graph.session import new_session_state
 from app.memory.checkpointer import get_checkpointer
 
 
@@ -34,7 +34,7 @@ async def main() -> None:
         session_id = str(uuid.uuid4())
         config = {"configurable": {"thread_id": session_id}}
 
-        state = new_state(user_question="Compare NVIDIA and AMD", session_id=session_id)
+        state = new_session_state(user_question="Compare NVIDIA and AMD", session_id=session_id)
         result = await graph.ainvoke(state, config=config)
         print(f"TURN 1 (initial): tickers={result['tickers']} query_type={result['query_type']}")
         print(result["final_report"][:400], "...\n")
@@ -45,8 +45,8 @@ async def main() -> None:
         r4 = await _ask(graph, config, "Now also add Intel to this comparison")
         print("\nFinal report tail:\n", r4["final_report"][-1200:])
 
-        print("\nconversation_history turns:", len(r4["conversation_history"]))
-        for m in r4["conversation_history"]:
+        print("\nconversation turns:", len(r4["conversation"]))
+        for m in r4["conversation"]:
             print(f"  [{m['role']}] {m['content'][:80]}")
 
 

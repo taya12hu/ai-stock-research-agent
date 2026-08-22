@@ -110,28 +110,19 @@ async def test_unregister_removes_only_that_queue() -> None:
 # --- _publish_for_node: notes only broadcast when they're not about to be redundant ---
 
 
-async def test_no_tickers_outcome_does_not_broadcast_notes_separately() -> None:
-    """When the router leaves tickers empty, those notes are exactly what
-    `_no_tickers_node` is about to compose into its reply verbatim (build_graph.py) —
-    broadcasting them here too would just send the same information twice."""
+async def test_plan_event_carries_this_turns_scope_shape_and_notes() -> None:
+    """Progress events are derived from the plan, not from which state field a node
+    happened to populate. `shape`/`scope` map onto the existing wire fields — the
+    frontend's query-type header and per-ticker agent cards mean exactly this — so the
+    format is unchanged even though the state behind it is entirely different."""
     session_id = str(uuid.uuid4())
     await _publish_for_node(
-        session_id, "router",
-        {"tickers": [], "query_type": "single", "notes": ["'MAXR' could not be found and was skipped."]},
-    )
-
-    events = [e for _, e in await session_bus.get_events_after(session_id, 0)]
-
-    assert events == [{"type": "router_completed", "query_type": "single", "tickers": [], "notes": []}]
-
-
-async def test_partial_ticker_failure_still_broadcasts_notes() -> None:
-    """When SOME tickers survive, the note about the one that didn't is a genuine
-    caveat alongside a real result — not redundant with anything — so it's still sent."""
-    session_id = str(uuid.uuid4())
-    await _publish_for_node(
-        session_id, "router",
-        {"tickers": ["AAPL"], "query_type": "single", "notes": ["'ZZZ' could not be found and was skipped."]},
+        session_id, "plan",
+        {"turn": {
+            "kind": "research", "shape": "single", "scope": ["AAPL"],
+            "notes": ["'ZZZ' could not be found and was skipped."],
+            "fetch": [{"ticker": "AAPL", "agent": "news"}],
+        }},
     )
 
     events = [e for _, e in await session_bus.get_events_after(session_id, 0)]
@@ -140,27 +131,84 @@ async def test_partial_ticker_failure_still_broadcasts_notes() -> None:
         "type": "router_completed", "query_type": "single", "tickers": ["AAPL"],
         "notes": ["'ZZZ' could not be found and was skipped."],
     }
+    assert events[1]["type"] == "agent_started"
+    assert events[1]["agent"] == "news"
 
 
-async def test_clarification_question_outcome_still_broadcasts_notes_even_with_empty_tickers() -> None:
-    """Regression guard for a real gap found on review: the filter must key off the
-    actual routing outcome (router_outcome), not 'tickers is empty' as a stand-in for
-    it. Nothing stops the model from setting `unaddressed_note` on the same turn as
-    `needs_clarification` (the schema allows both independently) — if that ever
-    happens, `_ask_clarification_node` doesn't read `notes` at all, so suppressing it
-    here would lose that information outright, not just hide a duplicate."""
+async def test_plan_event_starts_only_the_agents_actually_dispatched() -> None:
+    """One `agent_started` per cell in `fetch`, not per (ticker x agent) pair. A turn
+    narrowed to one aspect must not light up three agent cards that will never run."""
     session_id = str(uuid.uuid4())
     await _publish_for_node(
-        session_id, "router",
-        {
-            "tickers": [], "query_type": "single",
-            "notes": ["I can't help with recipes."],
-            "awaiting_clarification": True,
-        },
+        session_id, "plan",
+        {"turn": {
+            "kind": "research", "shape": "single", "scope": ["AAPL"], "notes": [],
+            "fetch": [{"ticker": "AAPL", "agent": "fundamentals"}],
+        }},
+    )
+
+    events = [e for _, e in await session_bus.get_events_after(session_id, 0)]
+    started = [e for e in events if e["type"] == "agent_started"]
+
+    assert len(started) == 1
+    assert started[0]["agent"] == "fundamentals"
+
+
+async def test_notes_folded_into_a_chat_reply_are_not_also_broadcast() -> None:
+    """The note field has two audiences: an aside alongside a real result, and the raw
+    material for the reply itself when there is no result. `plan_turn` clears them once
+    they have been folded into the prose, so a user is never told the same thing twice —
+    handled in the plan rather than re-derived by every downstream consumer."""
+    session_id = str(uuid.uuid4())
+    await _publish_for_node(
+        session_id, "plan",
+        {"turn": {
+            "kind": "chat", "shape": "single", "scope": [], "notes": [], "fetch": [],
+        }},
     )
 
     events = [e for _, e in await session_bus.get_events_after(session_id, 0)]
 
     assert events == [
-        {"type": "router_completed", "query_type": "single", "tickers": [], "notes": ["I can't help with recipes."]}
+        {"type": "router_completed", "query_type": "single", "tickers": [], "notes": []}
     ]
+
+
+async def test_emit_event_kind_follows_the_turns_output_not_the_node_that_ran() -> None:
+    """A-09: previously the event a turn produced depended on which state field the last
+    node happened to set, so a stale `final_report` from two turns earlier could surface
+    as the current answer. `turn.output.kind` says it directly."""
+    report_session = str(uuid.uuid4())
+    await _publish_for_node(
+        report_session, "emit",
+        {"turn": {"output": {"kind": "report", "text": "# Research Report: AAPL"}}},
+    )
+    answer_session = str(uuid.uuid4())
+    await _publish_for_node(
+        answer_session, "emit",
+        {"turn": {"output": {"kind": "answer", "text": "Its P/E is 30."}}},
+    )
+
+    report_events = [e for _, e in await session_bus.get_events_after(report_session, 0)]
+    answer_events = [e for _, e in await session_bus.get_events_after(answer_session, 0)]
+
+    assert report_events[0]["type"] == "report_ready"
+    assert answer_events[0]["type"] == "followup_answer_ready"
+
+
+async def test_specialist_results_broadcast_one_completion_per_cell() -> None:
+    session_id = str(uuid.uuid4())
+    await _publish_for_node(
+        session_id, "news",
+        {"researched": {"AAPL": {"news": {
+            "status": "ok", "summary": "s", "findings": [], "error": None,
+            "fetched_at": "2026-08-19T14:00:00+00:00",
+        }}}},
+    )
+
+    events = [e for _, e in await session_bus.get_events_after(session_id, 0)]
+
+    assert len(events) == 1
+    assert events[0]["type"] == "agent_completed"
+    assert events[0]["ticker"] == "AAPL"
+    assert events[0]["agent"] == "news"

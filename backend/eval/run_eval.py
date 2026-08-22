@@ -33,7 +33,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8")
 
 from app.graph.build_graph import build_research_graph
-from app.graph.state import new_state
+from app.graph.session import new_session_state
 from eval.judge import judge_report
 from eval.objective_checks import CheckResult, run_all_checks
 
@@ -42,18 +42,32 @@ DATASET_PATH = Path(__file__).resolve().parent / "dataset.yaml"
 
 
 def _snapshot(result: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a graph result into the shape the checks read.
+
+    The snapshot is the harness's adapter layer, so the turn-based state is translated
+    here rather than by teaching every check about `turn`. The mapping is one-to-one:
+    `shape` is what `query_type` always meant, `scope` is the tickers this answer covers,
+    and `researched` has the same nested {ticker: {agent: ...}} shape `per_ticker_results`
+    had, with cells carrying the same `status`/`findings` keys.
+
+    The one real improvement is that report-versus-plain-reply is now read off
+    `output.kind` rather than inferred from which field happened to be populated — a turn
+    can no longer appear to have both a fresh answer and a stale report (A-09).
+    """
+    turn = result.get("turn") or {}
+    output = turn.get("output") or {}
+    is_report = output.get("kind") == "report"
     return {
-        "query_type": result.get("query_type"),
-        "tickers": result.get("tickers"),
-        "notes": result.get("notes"),
-        "final_report": result.get("final_report"),
-        "per_ticker_results": result.get("per_ticker_results"),
-        "followup_path": result.get("followup_path"),
-        # Populated for a plain-reply turn (clarification question, off-topic/discovery
-        # explanation, follow-up answer) rather than a research report — needed so
-        # check_schema and the discovery-fabrication check can see turns that never
-        # produce a final_report at all.
-        "followup_answer": result.get("followup_answer"),
+        "query_type": turn.get("shape"),
+        "tickers": turn.get("scope"),
+        "notes": turn.get("notes"),
+        "final_report": output.get("text") if is_report else None,
+        "per_ticker_results": result.get("researched"),
+        "followup_path": turn.get("kind"),
+        # Any plain-reply turn (clarification, off-domain, recall answer) rather than a
+        # research report — needed so check_schema and the discovery-fabrication check can
+        # see turns that never produce a report at all.
+        "followup_answer": None if is_report else output.get("text"),
     }
 
 
@@ -62,7 +76,7 @@ async def run_case(graph: Any, case: dict[str, Any]) -> dict[str, Any]:
     config = {"configurable": {"thread_id": session_id}}
 
     start = time.perf_counter()
-    state = new_state(user_question=case["question"], session_id=session_id)
+    state = new_session_state(user_question=case["question"], session_id=session_id)
     result = await graph.ainvoke(state, config=config)
     turns: list[dict[str, Any]] = [
         {
@@ -91,9 +105,12 @@ async def run_case(graph: Any, case: dict[str, Any]) -> dict[str, Any]:
         )
 
     checks = run_all_checks(turns)
-    if result.get("final_report"):
+    final = turns[-1]["result_snapshot"]
+    if final.get("final_report"):
         try:
-            judge_scores = await judge_report(case["question"], result["query_type"], result["final_report"])
+            judge_scores = await judge_report(
+                case["question"], final["query_type"], final["final_report"]
+            )
             judge_dict: dict[str, Any] = judge_scores.model_dump()
         except Exception as exc:  # eval-harness robustness: one bad judge call shouldn't kill the run
             judge_dict = {"error": str(exc)}

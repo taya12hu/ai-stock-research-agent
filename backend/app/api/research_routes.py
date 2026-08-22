@@ -23,8 +23,7 @@ from fastapi.responses import StreamingResponse
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel
 
-from app.graph.build_graph import SPECIALIST_NODES, router_outcome
-from app.graph.state import new_state
+from app.graph.session import new_session_state
 from app.logging_config import get_logger, log_event
 from app.streaming import events as ev
 from app.streaming import session_bus
@@ -68,10 +67,10 @@ async def ask_followup(session_id: str, payload: FollowUpRequest, request: Reque
     existing = await graph.aget_state(_thread_config(session_id))
     # Any completed turn — research, a clarification question asked, or an off-topic
     # reply — means the session exists and the conversation can continue. Checking
-    # `conversation_history` (populated on every turn) rather than just
-    # `per_ticker_results`/`awaiting_clarification` avoids 404ing a session whose first
-    # message was off-topic, or one whose only clarification attempt dead-ended.
-    has_prior_turn = bool(existing.values.get("conversation_history"))
+    # `conversation` (written by `emit` on every path) rather than `researched` avoids
+    # 404ing a session whose first message was off-topic, or one whose only clarification
+    # attempt dead-ended.
+    has_prior_turn = bool(existing.values.get("conversation"))
     if not has_prior_turn:
         raise HTTPException(status_code=404, detail="No prior research session found for this session_id")
 
@@ -94,7 +93,7 @@ async def ask_followup(session_id: str, payload: FollowUpRequest, request: Reque
 
 
 async def _run_and_publish(graph: CompiledStateGraph, session_id: str, user_question: str) -> None:
-    state = new_state(user_question=user_question, session_id=session_id)
+    state = new_session_state(user_question=user_question, session_id=session_id)
     await _stream_run(graph, session_id, state)
 
 
@@ -120,50 +119,41 @@ async def _stream_run(graph: CompiledStateGraph, session_id: str, run_input: dic
 
 
 async def _publish_for_node(session_id: str, node_name: str, update: dict[str, Any] | None) -> None:
+    """Derive progress events from the plan, not from which state field a node happened to
+    populate.
+
+    The previous version sniffed for `followup_answer` / `per_ticker_results` /
+    `final_report` in the update, which meant the event a turn produced depended on which
+    node ran last rather than on what the turn was (A-09). `turn.kind` and
+    `turn.output.kind` say it directly.
+    """
     if not update:
         return
 
-    if node_name in ("router", "clarification_response"):
-        tickers: list[str] = update.get("tickers", [])
-        # `router_outcome` is the exact same precedence `_fan_out_after_router` routes
-        # on (build_graph.py) — asking it here, rather than re-guessing "empty tickers
-        # means these notes are redundant", is what keeps this correct if that field
-        # ever legitimately carries notes on an ask_clarification/off_topic outcome too
-        # (neither of those downstream nodes composes its reply from notes, so a note
-        # there would need its own banner, not silent suppression by coincidence).
-        notes = [] if router_outcome(update) == "no_tickers" else update.get("notes", [])
+    if node_name == "plan":
+        turn = update.get("turn") or {}
+        # `shape` and `scope` map onto the existing wire fields: the frontend's "query
+        # type" header and per-ticker agent cards mean exactly this, so the format is
+        # unchanged even though the state behind it is entirely different.
         await session_bus.publish(
-            session_id, ev.router_completed(update.get("query_type", ""), tickers, notes)
+            session_id, ev.router_completed(turn.get("shape", ""), turn.get("scope", []), turn.get("notes", []))
         )
-        for ticker in tickers:
-            for agent in SPECIALIST_NODES:
-                await session_bus.publish(session_id, ev.agent_started(ticker, agent))
+        for cell in turn.get("fetch", []):
+            await session_bus.publish(session_id, ev.agent_started(cell["ticker"], cell["agent"]))
         return
 
-    if node_name in ("followup_router", "followup_clarification_response"):
-        path = update.get("followup_path", "answer")
-        targets = update.get("followup_targets", [])
-        target_tickers = [t["ticker"] for t in targets]
-        await session_bus.publish(session_id, ev.followup_classified(path, target_tickers, update.get("notes", [])))
-        for target in targets:
-            for agent in target["agents"]:
-                await session_bus.publish(session_id, ev.agent_started(target["ticker"], agent))
+    if node_name == "emit":
+        output = (update.get("turn") or {}).get("output") or {}
+        if output.get("kind") == "report":
+            await session_bus.publish(session_id, ev.report_ready(output["text"]))
+        else:
+            await session_bus.publish(session_id, ev.followup_answer_ready(output.get("text", "")))
         return
 
-    # `answer_from_context` and `ask_clarification` both produce a plain text assistant
-    # reply this way — keyed on the field, not the node name, since either can set it.
-    if "followup_answer" in update:
-        await session_bus.publish(session_id, ev.followup_answer_ready(update["followup_answer"]))
-        return
-
-    if "per_ticker_results" in update:
-        for ticker, agent_updates in update["per_ticker_results"].items():
-            for agent, result in agent_updates.items():
-                await session_bus.publish(session_id, ev.agent_completed(ticker, agent, result))
-        return
-
-    if "final_report" in update:
-        await session_bus.publish(session_id, ev.report_ready(update["final_report"]))
+    if "researched" in update:
+        for ticker, cells in update["researched"].items():
+            for agent, cell in cells.items():
+                await session_bus.publish(session_id, ev.agent_completed(ticker, agent, cell))
 
 
 def _format_sse(event_id: int, event: dict[str, Any]) -> str:

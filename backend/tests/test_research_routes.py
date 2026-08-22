@@ -25,17 +25,17 @@ def _clean_running_tasks():
 
 
 class _FakeState:
-    def __init__(self, conversation_history: list[dict]) -> None:
-        self.values = {"conversation_history": conversation_history}
+    def __init__(self, conversation: list[dict]) -> None:
+        self.values = {"conversation": conversation}
 
 
 class _FakeGraph:
     """Enough of the compiled graph's surface for `ask_followup`'s own logic — the
     404/409 guards and background-task bookkeeping — without exercising real LangGraph
-    execution, which is already covered elsewhere (test_graph.py/test_followup.py)."""
+    execution, which is already covered in test_graph.py."""
 
-    def __init__(self, conversation_history: list[dict]) -> None:
-        self._state = _FakeState(conversation_history)
+    def __init__(self, conversation: list[dict]) -> None:
+        self._state = _FakeState(conversation)
 
     async def aget_state(self, config: dict) -> _FakeState:  # noqa: ARG002
         return self._state
@@ -45,8 +45,8 @@ class _FakeGraph:
         yield  # pragma: no cover - makes this an async generator that yields nothing
 
 
-def _fake_request(conversation_history: list[dict]) -> SimpleNamespace:
-    graph = _FakeGraph(conversation_history)
+def _fake_request(conversation: list[dict]) -> SimpleNamespace:
+    graph = _FakeGraph(conversation)
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(graph=graph)))
 
 

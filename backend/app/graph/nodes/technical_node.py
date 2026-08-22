@@ -1,7 +1,14 @@
 from __future__ import annotations
 
-from app.graph.nodes._shared import build_findings, node_result, run_structured_analysis
-from app.graph.state import Finding, ResearchState, Source, failed_result, ok_result
+from app.graph.nodes._shared import (
+    build_findings,
+    node_failed,
+    node_ok,
+    run_structured_analysis,
+    target_ticker,
+)
+from app.graph.session import SessionState
+from app.graph.state import Finding, Source
 from app.llm.errors import LLMAnalysisError
 from app.logging_config import get_logger, log_event
 from app.tools.errors import YahooFinanceError
@@ -47,14 +54,14 @@ def _build_prompt(data: TechnicalData, facts: list[tuple[str, object]]) -> str:
     )
 
 
-async def technical_node(state: ResearchState) -> dict:
-    ticker = state["tickers"][0]
+async def technical_node(state: SessionState) -> dict:
+    ticker = target_ticker(state)
 
     try:
         data = await aget_technical_data(ticker)
     except YahooFinanceError as exc:
         log_event(logger, "technical data fetch failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
-        return node_result(ticker, "technical", failed_result(str(exc)))
+        return node_failed(ticker, "technical", str(exc))
 
     facts = _facts(data)
     if len(facts) < MIN_FACTS_FOR_ANALYSIS:
@@ -62,16 +69,16 @@ async def technical_node(state: ResearchState) -> dict:
             logger, "technical: too little data to analyze", session_id=state["session_id"],
             ticker=ticker, fact_count=len(facts),
         )
-        return node_result(
+        return node_failed(
             ticker, "technical",
-            failed_result(f"Not enough price/indicator data was available for {ticker} to analyze."),
+            f"Not enough price/indicator data was available for {ticker} to analyze.",
         )
 
     try:
         analysis = await run_structured_analysis(_build_prompt(data, facts))
     except LLMAnalysisError as exc:
         log_event(logger, "technical analysis failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
-        return node_result(ticker, "technical", failed_result(str(exc)))
+        return node_failed(ticker, "technical", str(exc))
 
     source = Source(
         type="yahoo_finance",
@@ -88,4 +95,4 @@ async def technical_node(state: ResearchState) -> dict:
         logger, "technical node completed", session_id=state["session_id"],
         ticker=ticker, finding_count=len(findings),
     )
-    return node_result(ticker, "technical", ok_result(analysis.summary, findings))
+    return node_ok(ticker, "technical", analysis.summary, findings)

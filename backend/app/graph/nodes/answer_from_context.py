@@ -1,5 +1,20 @@
-"""Path 1 of follow-up handling: answer a question grounded only in what this session
-has already gathered — no tool calls, no re-running specialist agents.
+"""The recall lane: answer from research this session already holds, with no tool calls.
+
+Reached when `turn.fetch` is empty — every cell in scope passed the freshness check. That
+is a computation over timestamps and statuses, not a classifier's opinion that the question
+was "already covered", which is the distinction that matters: the old design let a single
+soft LLM judgment decide this, with nothing checking whether the underlying data had gone
+stale in the meantime.
+
+Two scoping details carry weight:
+
+- Only `turn.scope` cells are shown, not the whole session. A question about NVDA in a
+  three-ticker session should not be answered against context for two companies nobody
+  asked about.
+- The raw findings are shown alongside the last written answer. A report only ever carries
+  a subset of what was found (`MAX_FINDINGS_PER_AGENT` caps it for readability), so
+  answering from the prose alone produced a wrong "that wasn't covered" for anything
+  fetched that didn't make the cut.
 """
 
 from __future__ import annotations
@@ -7,65 +22,67 @@ from __future__ import annotations
 import logging
 
 from app.graph.nodes._synthesis_shared import ticker_section_block
-from app.graph.state import ResearchState
+from app.graph.session import SessionState, TurnOutput
 from app.llm.errors import RATE_LIMIT_MESSAGE, is_rate_limited
 from app.llm.groq_client import get_chat_model
 from app.logging_config import get_logger, log_event
+from app.replies import join_human
 
 logger = get_logger("app.graph.nodes.answer_from_context")
 
+_HISTORY_MESSAGES = 8
 
-def _build_prompt(state: ResearchState) -> str:
-    history = "\n".join(
-        f"{m['role']}: {m['content']}" for m in state.get("conversation_history", [])[-8:]
-    )
-    report = state.get("final_report") or "(no prior report available)"
-    per_ticker = state.get("per_ticker_results", {})
-    # The written report only ever carries a subset of what was actually found — up to 5
-    # findings per agent, picked by the synthesis LLM for narrative flow, not completeness
-    # (see MAX_FINDINGS_PER_AGENT). Passing the underlying findings too, not just the
-    # prose, is what lets this node correctly answer something that was fetched but never
-    # made it into the report, instead of wrongly saying "not covered."
-    detail_blocks = "\n\n".join(
-        ticker_section_block(t, per_ticker.get(t, {})) for t in state["tickers"]
+
+def _build_prompt(state: SessionState) -> str:
+    turn = state["turn"]
+    scope = turn["scope"]
+    researched = state.get("researched") or {}
+
+    blocks = "\n\n".join(
+        ticker_section_block(ticker, researched.get(ticker) or {}, turn["aspects"])
+        for ticker in scope
     ) or "(no underlying findings available)"
+
+    history = "\n".join(
+        f"{m['role']}: {m.get('gist') if m['role'] == 'assistant' and m.get('gist') else m['content']}"
+        for m in (state.get("conversation") or [])[-_HISTORY_MESSAGES:]
+    )
+
     return (
         "You are answering a follow-up question in an ongoing stock research session, "
-        "grounded ONLY in the research already gathered below — both the underlying "
-        "findings and the written report, which only ever contains a subset of them. If "
-        "the answer genuinely isn't covered by either, say so plainly rather than "
-        "guessing or inventing facts. If asked for a buy/sell/hold view, give one "
-        "grounded only in the findings already gathered, with a brief rationale and a "
-        "confidence qualifier, and note that this is not personalized financial advice.\n\n"
-        f"Tickers researched: {', '.join(state['tickers'])}\n\n"
-        f"Underlying findings, per ticker:\n{detail_blocks}\n\n"
-        f"Most recently written report:\n{report}\n\n"
+        "grounded ONLY in the research below. If the answer genuinely isn't covered by "
+        "it, say so plainly rather than guessing or inventing facts. If asked for a "
+        "buy/sell/hold view, give one grounded only in these findings, with a brief "
+        "rationale and a confidence qualifier, and note that it is not personalized "
+        "financial advice.\n\n"
+        f"This answer covers: {join_human(scope)}\n\n"
+        f"Research gathered for those companies:\n{blocks}\n\n"
         f"Recent conversation:\n{history}\n\n"
-        f'Follow-up question: "{state["user_question"]}"'
+        f'Question: "{state["user_question"]}"'
     )
 
 
-async def answer_from_context_node(state: ResearchState) -> dict:
+async def answer_from_context_node(state: SessionState) -> dict:
+    turn = state["turn"]
     try:
         llm = get_chat_model(temperature=0.2)
         response = await llm.ainvoke(_build_prompt(state))
         answer = response.content
     except Exception as exc:
-        # The raw provider exception (e.g. a rate-limit error body) is logged here, in
-        # full, for debugging — never shown to the user; see the equivalent guard in
-        # `_shared.py`'s run_structured_analysis for why.
+        # The raw provider exception is logged in full for debugging and never shown —
+        # same discipline as `run_structured_analysis`.
         log_event(
             logger, "answer_from_context LLM call failed", level=logging.ERROR,
             session_id=state["session_id"], error=str(exc),
         )
         answer = (
-            RATE_LIMIT_MESSAGE if is_rate_limited(exc) else
-            "Sorry, I couldn't generate an answer to that follow-up right now. "
-            "The most recent full report is still available above."
+            RATE_LIMIT_MESSAGE
+            if is_rate_limited(exc)
+            else "Sorry, I couldn't answer that right now. The research above is still available."
         )
 
-    log_event(logger, "answer_from_context completed", session_id=state["session_id"])
-    return {
-        "followup_answer": answer,
-        "conversation_history": [{"role": "assistant", "content": answer}],
-    }
+    log_event(
+        logger, "answer_from_context completed",
+        session_id=state["session_id"], scope=turn["scope"],
+    )
+    return {"turn": {**turn, "output": TurnOutput(kind="answer", text=answer)}}

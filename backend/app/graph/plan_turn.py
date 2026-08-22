@@ -90,7 +90,11 @@ def plan_turn(
     # ladder: inheriting `last_scope` here would answer about a company the user didn't
     # ask about, which is worse than admitting we couldn't find the one they did.
     if resolution.attempted and not resolution.subjects and not resolution.unclear:
-        return _chat(turn, replies.unresolved_tickers(resolution.notes, tickers))
+        return _chat(
+            turn,
+            replies.unresolved_tickers(resolution.notes, tickers),
+            consumed_notes=True,
+        )
 
     candidates = resolution.subjects or resolution.unclear
 
@@ -226,9 +230,20 @@ def _compute_fetch(
 # ─────────────────────────── terminal plans ───────────────────────────
 
 
-def _chat(turn: TurnPlan, reply: str) -> TurnPlan:
+def _chat(turn: TurnPlan, reply: str, *, consumed_notes: bool = False) -> TurnPlan:
+    """`consumed_notes` marks a reply that was *built from* the notes rather than
+    accompanied by them.
+
+    `notes` has two audiences — an aside shown alongside a result, and the raw material for
+    a reply when there is no result. Once they have been folded into the prose, leaving
+    them on the turn would surface them a second time through the progress event, telling
+    the user the same thing twice. Clearing them here keeps that a property of the plan
+    rather than something every downstream consumer has to remember to special-case.
+    """
     turn["kind"] = "chat"
     turn["reply"] = reply
+    if consumed_notes:
+        turn["notes"] = []
     return turn
 
 
