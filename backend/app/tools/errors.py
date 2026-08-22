@@ -1,7 +1,7 @@
 """Exceptions raised by the tools layer (external data source failures).
 
 Agent nodes (built in a later phase) are expected to catch these, never let them
-propagate, and turn them into a failed `AgentResult` instead — see ARCHITECTURE.md §10.
+propagate, and turn them into a failed result cell instead — see ARCHITECTURE.md §9.
 """
 
 from __future__ import annotations

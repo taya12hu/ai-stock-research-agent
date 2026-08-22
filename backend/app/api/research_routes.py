@@ -1,7 +1,7 @@
 """POST /research starts a run in the background; GET /research/{id}/stream serves its
 progress as SSE, replaying persisted events on reconnect via `Last-Event-ID` (see
-ARCHITECTURE.md §9 and `app/streaming/session_bus.py`). POST /research/{id}/ask handles
-a follow-up turn in the same session (ARCHITECTURE.md §8) — the session's conversation
+ARCHITECTURE.md §10 and `app/streaming/session_bus.py`). POST /research/{id}/ask handles
+a follow-up turn in the same session (ARCHITECTURE.md §5) — the session's conversation
 persists across both endpoints via the LangGraph checkpointer, keyed by
 `thread_id` = `session_id` (see `app/memory/checkpointer.py`).
 

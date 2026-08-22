@@ -1,6 +1,6 @@
 """Web search for recent news, via DuckDuckGo (`ddgs`).
 
-Design notes (see ARCHITECTURE.md §6, §10):
+Design notes (see ARCHITECTURE.md §8, §9):
 - `DDGS().news(...)` raises `DDGSException("No results found.")` when a query has zero
   matches — that is a legitimate outcome (e.g. a thin-news-coverage company), not a
   failure, so it is caught and treated as an empty result list, distinct from real
@@ -8,7 +8,7 @@ Design notes (see ARCHITECTURE.md §6, §10):
   `WebSearchError`.
 - News results carry a `date` and `source`; if news search comes back empty, we fall
   back to a general text search (title/snippet/url only, no date/source).
-- No full-page scraping (see ARCHITECTURE.md §6) — the evidence unit is the search
+- No full-page scraping (see ARCHITECTURE.md §8) — the evidence unit is the search
   result itself (title + snippet + url), which is what the news agent (a later phase)
   grounds citations in.
 """

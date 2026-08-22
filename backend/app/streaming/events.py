@@ -1,4 +1,4 @@
-"""SSE event shapes published to the browser during a research run (ARCHITECTURE.md §9).
+"""SSE event shapes published to the browser during a research run (ARCHITECTURE.md §10).
 
 Events are derived from LangGraph's `astream(state, stream_mode="updates")` output at
 the API layer (see `app/api/research_routes.py`) — no node code publishes events

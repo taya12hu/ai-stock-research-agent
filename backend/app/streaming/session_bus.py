@@ -1,4 +1,4 @@
-"""Per-session event log + live pub/sub (ARCHITECTURE.md §9).
+"""Per-session event log + live pub/sub (ARCHITECTURE.md §10).
 
 Events are durably appended to SQLite first, then fanned out to any live subscribers.
 This ordering is what makes reconnection correct: a client's `Last-Event-ID` replay

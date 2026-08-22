@@ -4,7 +4,7 @@ Every node, tool call, and API request should log through a logger obtained from
 `get_logger(component)`, and wrap non-trivial functions/flows with `@trace(component)`
 so entry/exit/duration/failure show up in `logs/dump.log` without hand-written
 boilerplate at every call site. This is the developer-facing observability layer,
-distinct from the user-facing SSE event stream (see ARCHITECTURE.md §9).
+distinct from the user-facing SSE event stream (see ARCHITECTURE.md §10).
 """
 
 from __future__ import annotations

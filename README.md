@@ -7,8 +7,9 @@ partial data/agent failure, follow-up Q&A, and a small evaluation harness to mea
 whether changes actually help.
 
 This is a learning-scoped project. It is **not** an autonomous trading system or a
-production financial platform — see [ARCHITECTURE.md](./ARCHITECTURE.md) §12 for
-explicit non-goals.
+production financial platform — see [ARCHITECTURE.md §1](./ARCHITECTURE.md#1-what-this-is)
+for what it deliberately doesn't do, and
+[§13](./ARCHITECTURE.md#13-known-limits) for its known limits.
 
 Full system design lives in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
@@ -20,11 +21,14 @@ Ask about a company, a portfolio, or a comparison:
 - **Portfolio**: "Analyze my portfolio of NVIDIA, Apple and Microsoft"
 - **Comparison**: "Compare NVIDIA and AMD"
 
-Three specialist agents run independently per ticker (fundamentals, technical, news),
-streaming their progress live to the UI. A synthesis step merges whatever succeeded into
-one report with inline citations back to the data that supports each claim. You can then
-ask grounded follow-up questions in the same session, including ones that need fresh data
-(e.g. "any news on AMD today?" or "add Intel to the comparison").
+Three specialist agents run independently per company (fundamentals, technical, news),
+streaming their progress live to the UI. A final step merges whatever succeeded into one
+report with inline citations back to the data behind each claim. You can then ask
+follow-up questions in the same session, including ones that need fresh data (e.g. "any
+news on AMD today?" or "add Intel to the comparison").
+
+Follow-ups reuse what's already been fetched when it's still current, and re-fetch only
+the parts that have gone stale — see [ARCHITECTURE.md §4](./ARCHITECTURE.md#4-deciding-scope-shape-and-what-to-fetch).
 
 ## Project layout
 
@@ -33,8 +37,6 @@ backend/    FastAPI + LangGraph app (Python)
 frontend/   React + TypeScript UI (Vite)
 logs/       runtime application log (dump.log) — gitignored
 ```
-
-See [ARCHITECTURE.md §5](./ARCHITECTURE.md#5-repository-layout) for the full tree.
 
 ## Prerequisites
 
@@ -79,7 +81,11 @@ Get-Content logs/dump.log -Wait -Tail 50   # PowerShell
 
 ## Status
 
-All phases of the build order in [ARCHITECTURE.md §13](./ARCHITECTURE.md#13-build-order)
-are implemented and tested end-to-end: tools layer, single/portfolio/comparison graph,
-streaming, follow-up conversation (incl. clarification handling), frontend, and the eval
-harness.
+Working end-to-end: the tools layer, the research graph (single / comparison / portfolio),
+live streaming with reconnect, multi-turn follow-ups with clarification handling, the
+frontend, and the eval harness.
+
+The graph was rebuilt around per-turn planning — every message gets its scope, its shape,
+and its data-freshness decisions worked out fresh, in plain code rather than by the model.
+[ARCHITECTURE.md §2](./ARCHITECTURE.md#2-the-one-idea-that-shapes-everything) explains why,
+and [§13](./ARCHITECTURE.md#13-known-limits) lists what's still limited.
