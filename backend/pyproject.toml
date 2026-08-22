@@ -21,6 +21,10 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0",
     "aiosqlite>=0.20",
     "pyyaml>=6.0",
+    # `app/graph/freshness.py` resolves America/New_York to decide whether the US market
+    # is open. Present transitively via pandas today, declared explicitly because
+    # correctness depends on it: without the IANA database `zoneinfo` raises at import.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
