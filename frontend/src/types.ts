@@ -78,6 +78,11 @@ export interface TranscriptEntry {
   agents: Record<string, TickerAgents>;
   notes: string[];
   error: string | null;
+  // Set once the router/followup_router has classified this turn (regardless of
+  // outcome) — the signal the activity indicator uses to know classification is done,
+  // since queryType/tickers/notes can all legitimately stay empty for some outcomes
+  // (off-topic, no tickers resolved) and so can't be used for that alone.
+  classified: boolean;
 }
 
 export interface ResearchStreamState {

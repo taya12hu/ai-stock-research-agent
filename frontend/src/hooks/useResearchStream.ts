@@ -29,7 +29,7 @@ const initialState: ResearchStreamState = {
 function newEntry(id: number, question: string): TranscriptEntry {
   return {
     id, question, answer: null, report: null,
-    queryType: null, tickers: [], agents: {}, notes: [], error: null,
+    queryType: null, tickers: [], agents: {}, notes: [], error: null, classified: false,
   };
 }
 
@@ -69,6 +69,7 @@ function applyEvent(prev: ResearchStreamState, event: ResearchEvent): ResearchSt
         ...prev,
         transcript: updateLastEntry(prev.transcript, (e) => ({
           ...e,
+          classified: true,
           queryType: event.query_type,
           tickers: event.tickers,
           notes: [...e.notes, ...event.notes],
@@ -77,7 +78,13 @@ function applyEvent(prev: ResearchStreamState, event: ResearchEvent): ResearchSt
     case "followup_classified":
       return {
         ...prev,
-        transcript: updateLastEntry(prev.transcript, (e) => ({ ...e, notes: [...e.notes, ...event.notes] })),
+        // `tickers` matters here too, not just `notes` — this is the only event that
+        // tells the frontend which tickers a follow-up is (re)researching, and without
+        // setting it the step tracker (and the ticker/agent cards it renders) never
+        // appear for a follow-up turn even though agents are actually running.
+        transcript: updateLastEntry(prev.transcript, (e) => ({
+          ...e, classified: true, tickers: event.tickers, notes: [...e.notes, ...event.notes],
+        })),
       };
     case "agent_started":
       return {
@@ -264,6 +271,9 @@ export function useResearchStream() {
           agents: e.agents ?? {},
           notes: e.notes ?? [],
           error: e.error ?? null,
+          // A chat saved before this field existed lacks it in its JSON; treat it as
+          // classified since every prior-saved entry that got this far necessarily was.
+          classified: e.classified ?? true,
         })),
       });
     },
