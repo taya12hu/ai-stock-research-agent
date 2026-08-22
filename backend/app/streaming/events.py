@@ -15,7 +15,6 @@ from app.graph.state import Finding
 EventType = Literal[
     "run_started",
     "router_completed",
-    "followup_classified",
     "agent_started",
     "agent_completed",
     "report_ready",
@@ -34,13 +33,6 @@ class RunStartedEvent(TypedDict):
 class RouterCompletedEvent(TypedDict):
     type: Literal["router_completed"]
     query_type: str
-    tickers: list[str]
-    notes: list[str]
-
-
-class FollowUpClassifiedEvent(TypedDict):
-    type: Literal["followup_classified"]
-    path: str
     tickers: list[str]
     notes: list[str]
 
@@ -83,7 +75,6 @@ class RunFailedEvent(TypedDict):
 Event = Union[
     RunStartedEvent,
     RouterCompletedEvent,
-    FollowUpClassifiedEvent,
     AgentStartedEvent,
     AgentCompletedEvent,
     ReportReadyEvent,
@@ -99,10 +90,6 @@ def run_started() -> RunStartedEvent:
 
 def router_completed(query_type: str, tickers: list[str], notes: list[str]) -> RouterCompletedEvent:
     return {"type": "router_completed", "query_type": query_type, "tickers": tickers, "notes": notes}
-
-
-def followup_classified(path: str, tickers: list[str], notes: list[str]) -> FollowUpClassifiedEvent:
-    return {"type": "followup_classified", "path": path, "tickers": tickers, "notes": notes}
 
 
 def agent_started(ticker: str, agent: str) -> AgentStartedEvent:

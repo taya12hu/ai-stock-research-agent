@@ -31,8 +31,33 @@ from app.streaming import session_bus
 logger = get_logger("app.api.research")
 router = APIRouter()
 
-# Keeps references to fire-and-forget run tasks so they aren't garbage-collected mid-run.
+# Keeps references to fire-and-forget run tasks so they aren't garbage-collected mid-run,
+# and doubles as the "is this session busy" registry.
 _running_tasks: dict[str, asyncio.Task] = {}
+
+# Guards the check-and-claim below. The previous version was correct, but only by accident
+# of statement ordering: there was no `await` between reading `_running_tasks` and writing
+# it back, so asyncio's single-threaded scheduling happened to make the pair atomic.
+# Any future `await` inserted into that window would have silently reintroduced a race in
+# which two concurrent runs drive the same checkpointer thread. Making the critical section
+# explicit means the correctness no longer depends on nobody adding a line.
+_registry_lock = asyncio.Lock()
+
+
+async def _claim_session(session_id: str, coro: Any) -> bool:
+    """Start `coro` as this session's run, unless one is already in flight.
+
+    `.done()` rather than plain membership: `_stream_run`'s `finally` pops the entry, but
+    only once the task has actually finished, so a membership check would report "busy" for
+    one extra tick at completion.
+    """
+    async with _registry_lock:
+        running = _running_tasks.get(session_id)
+        if running is not None and not running.done():
+            coro.close()  # never awaited — close it so Python doesn't warn about it
+            return False
+        _running_tasks[session_id] = asyncio.create_task(coro)
+        return True
 
 
 class ResearchRequest(BaseModel):
@@ -55,8 +80,9 @@ def _thread_config(session_id: str) -> dict[str, Any]:
 async def start_research(payload: ResearchRequest, request: Request) -> ResearchResponse:
     session_id = str(uuid.uuid4())
     graph = request.app.state.graph
-    task = asyncio.create_task(_run_and_publish(graph, session_id, payload.question))
-    _running_tasks[session_id] = task
+    # A fresh uuid can't collide, so this claim always succeeds — routed through the same
+    # helper anyway so there is exactly one place that registers a run.
+    await _claim_session(session_id, _run_and_publish(graph, session_id, payload.question))
     log_event(logger, "research run started", session_id=session_id)
     return ResearchResponse(session_id=session_id)
 
@@ -74,20 +100,16 @@ async def ask_followup(session_id: str, payload: FollowUpRequest, request: Reque
     if not has_prior_turn:
         raise HTTPException(status_code=404, detail="No prior research session found for this session_id")
 
-    running = _running_tasks.get(session_id)
-    if running is not None and not running.done():
-        # The frontend already disables its input while `status === "running"`
-        # (App.tsx), which covers a single tab — this guards the same session against a
-        # second tab, a client retry, or any other caller racing a `POST .../ask` against
-        # a run that's still writing to the same LangGraph checkpointer thread. Checking
-        # `.done()` rather than just dict membership matters: `_stream_run`'s `finally`
-        # pops the entry, but only after the task has actually finished, so a plain
-        # membership check would report "busy" for one extra tick right at completion —
-        # `.done()` is accurate the instant the task's coroutine returns.
+    # The frontend already disables its input while `status === "running"` (App.tsx), which
+    # covers a single tab — this guards the same session against a second tab, a client
+    # retry, or any other caller racing a `POST .../ask` against a run that is still
+    # writing to the same LangGraph checkpointer thread.
+    claimed = await _claim_session(
+        session_id, _run_followup_and_publish(graph, session_id, payload.question)
+    )
+    if not claimed:
         raise HTTPException(status_code=409, detail="A run is already in progress for this session")
 
-    task = asyncio.create_task(_run_followup_and_publish(graph, session_id, payload.question))
-    _running_tasks[session_id] = task
     log_event(logger, "followup run started", session_id=session_id)
     return ResearchResponse(session_id=session_id)
 

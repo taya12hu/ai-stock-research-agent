@@ -85,6 +85,33 @@ async def test_ask_followup_rejects_a_second_call_while_a_run_is_still_in_progre
         await in_flight
 
 
+async def test_two_concurrent_followups_result_in_exactly_one_run() -> None:
+    """The guard used to be correct only by statement ordering — there was no `await`
+    between reading `_running_tasks` and writing it back, so asyncio's single-threaded
+    scheduling happened to make the pair atomic. `ask_followup` does await
+    `graph.aget_state` beforehand, so two callers can genuinely interleave up to that
+    point; an explicit lock is what makes the claim itself indivisible rather than relying
+    on nobody ever adding a line in the window.
+    """
+    session_id = str(uuid.uuid4())
+    request = _fake_request([{"role": "user", "content": "hi"}])
+
+    results = await asyncio.gather(
+        ask_followup(session_id, FollowUpRequest(question="one"), request),
+        ask_followup(session_id, FollowUpRequest(question="two"), request),
+        return_exceptions=True,
+    )
+
+    accepted = [r for r in results if not isinstance(r, Exception)]
+    rejected = [r for r in results if isinstance(r, HTTPException)]
+
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    assert rejected[0].status_code == 409
+
+    await _running_tasks[session_id]
+
+
 async def test_ask_followup_allows_a_new_call_once_the_previous_run_finished() -> None:
     session_id = str(uuid.uuid4())
     request = _fake_request([{"role": "user", "content": "hi"}])
