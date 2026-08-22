@@ -28,18 +28,19 @@ Here the split is structural:
 
 One caveat that has to be enforced rather than assumed: on a follow-up the API passes only
 `{"user_question": ...}` and LangGraph merges it into the checkpointed state, so the
-*previous* turn's `turn` is still present until something overwrites it. `entry_gate`
-returns `fresh_turn()` as its first act for exactly that reason — otherwise a node reading
-`state["turn"]` before `plan_turn` had run would see stale scope, which is the precise bug
-class this schema exists to remove.
+*previous* turn's `turn` is still present until something overwrites it. `plan_node` runs
+first on every path and returns a complete plan built from `fresh_turn()`, so the stale one
+is replaced before any reader exists. Any future node inserted ahead of it must preserve
+that property — reading `state["turn"]` before the plan is built would see the previous
+turn's scope, which is the precise bug class this schema exists to remove.
 """
 
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
 
-from app.graph.state import AGENT_NAMES, AgentName, Finding, Message
+from app.graph.state import AGENT_NAMES, AgentName, Finding
 
 Shape = Literal["single", "comparison", "portfolio"]
 
@@ -57,6 +58,28 @@ TurnKind = Literal["research", "recall", "clarify", "chat"]
 CompanyRole = Literal["research_subject", "incidental", "unclear"]
 
 OutputKind = Literal["report", "answer", "clarify", "chat"]
+
+
+class ConversationMessage(TypedDict):
+    """One turn of the transcript.
+
+    `gist` is a machine-written one-line summary of what an assistant turn *was* — its
+    kind, scope, and whether anything failed — and it is what the classifier sees instead
+    of `content`.
+
+    That substitution is not a token-budget optimisation, it is a correctness one. A
+    comparison report is thousands of words that mention competitors, suppliers, index
+    names and analyst firms in passing, and the classifier's main job is extracting
+    company names from text. Feeding it the report body is a live risk of an Intel mention
+    inside an NVDA report putting INTC into `companies[]` on a turn where the user never
+    said it. Truncating to the first N characters — what the previous prompt builders did —
+    does not fix that; it only changes which paragraph leaks. User turns carry no such
+    risk and are shown verbatim, because their exact wording is the entire signal.
+    """
+
+    role: Literal["user", "assistant"]
+    content: str
+    gist: NotRequired[str]
 
 
 class TickerCell(TypedDict):
@@ -156,7 +179,7 @@ class SessionState(TypedDict):
     session_id: str
     user_question: str
     researched: Annotated[dict[str, dict[AgentName, TickerCell]], merge_cells]
-    conversation: Annotated[list[Message], operator.add]
+    conversation: Annotated[list[ConversationMessage], operator.add]
     last_scope: list[str]
     last_shape: Shape
     pending: PendingClarification | None
