@@ -118,18 +118,52 @@ def check_total_failure_explicit(snapshot: dict[str, Any]) -> CheckResult:
     return CheckResult("total_failure_explicit", ok, detail)
 
 
-def check_partial_failure_mentioned(snapshot: dict[str, Any]) -> CheckResult:
-    """Softer sibling of the above: when only SOME agents failed, the synthesis LLM is
-    instructed to mention the gap, but that's LLM behavior, not a guaranteed string."""
-    all_results = _all_agent_results(snapshot.get("per_ticker_results"))
-    any_failed = any(r["status"] == "failed" for r in all_results)
-    if not any_failed:
-        return CheckResult("partial_failure_mentioned", True, "not applicable (no failures)", hard=False)
-    report = (snapshot.get("final_report") or "").lower()
-    keywords = ("unavailable", "could not", "failed", "no data", "not available")
-    ok = any(kw in report for kw in keywords)
-    detail = "report acknowledges the gap" if ok else "report may be silently omitting a failed source"
-    return CheckResult("partial_failure_mentioned", ok, detail, hard=False)
+def check_partial_failure_disclosed(snapshot: dict[str, Any]) -> CheckResult:
+    """When some — but not all — of a turn's cells came back unusable, the report must say
+    so.
+
+    This used to be a soft check on the synthesis model's wording, because the disclosure
+    was requested in a prompt ("if a section says 'Unavailable', mention that gap") and a
+    prompt is a request, not a guarantee. `emit` now assembles a coverage line from the
+    cells themselves, so the disclosure exists whether the model narrates it or not — which
+    makes this a real contract the code keeps, and therefore a hard gate.
+
+    Scoped to the turn's own cells. `researched` accumulates everything the session ever
+    fetched, so a failure on a ticker this turn wasn't covering is not this turn's gap.
+    """
+    report = snapshot.get("final_report")
+    if not report:
+        # Plain replies (clarification, off-domain, recall answers) carry no coverage line
+        # by design — a failure severe enough to prevent a report is stated in the reply
+        # itself, which `check_total_failure_explicit` covers.
+        return CheckResult("partial_failure_disclosed", True, "not applicable (no report)")
+
+    researched = snapshot.get("per_ticker_results") or {}
+    aspects = snapshot.get("aspects") or []
+    gaps = [
+        f"{ticker}/{agent}"
+        for ticker in (snapshot.get("tickers") or [])
+        for agent in aspects
+        if not _cell_is_usable((researched.get(ticker) or {}).get(agent))
+    ]
+    if not gaps:
+        return CheckResult("partial_failure_disclosed", True, "not applicable (nothing missing)")
+
+    ok = "coverage:" in report.lower()
+    detail = (
+        f"coverage line present for {len(gaps)} gap(s)"
+        if ok
+        else f"report omits the coverage line despite gaps: {gaps}"
+    )
+    return CheckResult("partial_failure_disclosed", ok, detail)
+
+
+def _cell_is_usable(cell: dict[str, Any] | None) -> bool:
+    """Mirrors `app.graph.freshness.is_usable`. Deliberately re-stated rather than imported:
+    the harness asserts on the *output contract*, and importing the implementation would
+    make the check agree with the code by construction even if both were wrong.
+    """
+    return bool(cell) and cell.get("status") == "ok" and bool(cell.get("findings"))
 
 
 def check_followup_path(turn: dict[str, Any]) -> CheckResult | None:
@@ -191,7 +225,7 @@ def run_all_checks(turns: list[dict[str, Any]]) -> list[CheckResult]:
         check_citation_integrity(final_snapshot),
         check_findings_well_formed(final_snapshot),
         check_total_failure_explicit(final_snapshot),
-        check_partial_failure_mentioned(final_snapshot),
+        check_partial_failure_disclosed(final_snapshot),
         check_latency(turns[-1]["elapsed_seconds"], len(final_snapshot.get("tickers") or [])),
     ]
     for i, turn in enumerate(turns):

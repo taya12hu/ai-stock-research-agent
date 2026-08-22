@@ -60,6 +60,10 @@ def _snapshot(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "query_type": turn.get("shape"),
         "tickers": turn.get("scope"),
+        # Which analyses this turn actually asked for. Needed to judge coverage: a gap
+        # only counts against a turn that was covering that aspect in the first place,
+        # and `researched` holds every cell the whole session ever fetched.
+        "aspects": turn.get("aspects"),
         "notes": turn.get("notes"),
         "final_report": output.get("text") if is_report else None,
         "per_ticker_results": result.get("researched"),
@@ -108,8 +112,16 @@ async def run_case(graph: Any, case: dict[str, Any]) -> dict[str, Any]:
     final = turns[-1]["result_snapshot"]
     if final.get("final_report"):
         try:
+            # Judge the last turn's report against the question that *produced* it, not
+            # against the case's opening question. Those used to be interchangeable,
+            # because a follow-up re-rendered the whole report for the same companies.
+            # Now that a turn can narrow, they are not: a case that opens with "Compare
+            # NVIDIA and AMD" and then asks "how is NVDA doing on its own?" correctly
+            # ends on an NVDA-only report, and grading that against the opening question
+            # scored the fix as a failure — "completely ignores AMD" — when ignoring AMD
+            # was the whole point.
             judge_scores = await judge_report(
-                case["question"], final["query_type"], final["final_report"]
+                turns[-1]["question"], final["query_type"], final["final_report"]
             )
             judge_dict: dict[str, Any] = judge_scores.model_dump()
         except Exception as exc:  # eval-harness robustness: one bad judge call shouldn't kill the run
