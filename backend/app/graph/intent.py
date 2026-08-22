@@ -91,10 +91,16 @@ class TurnIntent(BaseModel):
     refers_to_prior: bool = Field(
         default=False,
         description=(
-            "True when the message points back at something already discussed instead of "
-            "naming it — 'which one is better?', 'why?', 'what about the other one?', "
-            "'is it still a good entry?'. Set this even when you cannot tell which "
-            "specific company is meant; resolving the reference is not your job."
+            "True when the message ASKS something about a company already discussed, "
+            "without naming it — 'which one is better?', 'why?', 'what about the other "
+            "one?', 'is it still a good entry?'. Set it even when you cannot tell which "
+            "company is meant; resolving the reference is not your job.\n\n"
+            "The test is whether something is being asked, not whether the message looks "
+            "backwards. 'Thanks, that was helpful', 'interesting', 'ok got it' all refer "
+            "to the previous answer and ask nothing — those are false. A message that "
+            "only comments on, acknowledges, or reacts to what was said is not a request "
+            "for anything, and treating it as one produces an unwanted answer about "
+            "whichever company was last discussed."
         ),
     )
     screening_scope: str | None = Field(

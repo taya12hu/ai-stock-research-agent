@@ -91,8 +91,15 @@ def _projection(state: SessionState) -> str:
             f'The question they originally asked was: "{pending["original_question"]}"\n'
             "This new message is most likely their answer — read it that way. If it names "
             "companies, those are the answer to that question, and the original question "
-            "tells you what form of answer they wanted. If instead they have moved on to "
-            "something else, classify it as whatever it actually is."
+            "tells you what form of answer they wanted.\n"
+            "The reply may point at one of the choices by position or description instead "
+            "of by name — 'the second one', 'the first', 'the chip one', 'the bank'. Work "
+            "out which company that is from the choices your question listed, and put that "
+            "company in `companies` with the role the original question implies. This is a "
+            "reference you have enough information to resolve, so resolve it; leaving it "
+            "for later loses the one piece of context that makes it resolvable.\n"
+            "If instead they have moved on to something else, classify it as whatever it "
+            "actually is."
         )
 
     return "\n".join(lines)
