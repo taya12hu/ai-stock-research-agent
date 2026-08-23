@@ -1,23 +1,9 @@
-import type { AgentName, AgentState, AgentStatus } from "../types";
+import type { AgentName, AgentState, Finding } from "../types";
 
 const LABELS: Record<AgentName, string> = {
   fundamentals: "Fundamentals",
   technical: "Technical",
   news: "News & Sentiment",
-};
-
-const STATUS_STYLES: Record<AgentStatus, string> = {
-  queued: "bg-slate-800 text-slate-400",
-  running: "bg-amber-500/10 text-amber-400 ring-1 ring-inset ring-amber-500/30",
-  ok: "bg-emerald-500/10 text-emerald-400 ring-1 ring-inset ring-emerald-500/30",
-  failed: "bg-rose-500/10 text-rose-400 ring-1 ring-inset ring-rose-500/30",
-};
-
-const STATUS_LABELS: Record<AgentStatus, string> = {
-  queued: "queued",
-  running: "running…",
-  ok: "done",
-  failed: "failed",
 };
 
 // Backend exceptions occasionally leak raw provider error payloads (JSON blobs, stack
@@ -33,68 +19,126 @@ function friendlyError(raw: string): string {
   return raw;
 }
 
+function SourceLink({ source }: { source: Finding["source"] }) {
+  if (!source.url) return <span className="w-3.5 shrink-0" />;
+  return (
+    <a
+      href={source.url}
+      target="_blank"
+      rel="noreferrer"
+      title={source.label}
+      aria-label={`Source: ${source.label}`}
+      className="mt-0.5 shrink-0 text-ink-600 transition hover:text-blue-400"
+    >
+      <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5">
+        <path
+          d="M6.5 3.5H3.5v9h9v-3M9.5 3.5h3v3M12.5 3.5L7 9"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </a>
+  );
+}
+
+// Findings are a claim plus its supporting evidence, not tabular data. The previous
+// three-column table ("Claim | Evidence | Src") had to fit inside a third-width card, so
+// every claim wrapped to four lines and the word "link" repeated down the page.
+//
+// Two genuinely different kinds of evidence arrive here, and one layout cannot serve
+// both. `market_data` evidence is a figure ("RSI (14-day): 78.49") — short, worth
+// right-aligning in tabular-nums so values line up down the column. `web` evidence is a
+// sentence of article prose, sometimes 200+ characters. Rendering that as a nowrap
+// right-hand figure is what crushed the news claims into a one-word-per-line column and
+// pushed the snippet off the edge of the card, so it stacks underneath the claim instead
+// and drops the mono/tabular treatment, which does nothing for prose.
+function FindingRow({ finding }: { finding: Finding }) {
+  const isProse = finding.source.type === "web";
+
+  if (isProse) {
+    return (
+      <div className="border-b border-ink-800/60 py-2.5 last:border-b-0">
+        <div className="flex items-start gap-3">
+          <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink-300">{finding.claim}</p>
+          <SourceLink source={finding.source} />
+        </div>
+        <p className="mt-1 border-l-2 border-ink-800 pl-2.5 text-[12px] leading-relaxed text-ink-500">
+          {finding.evidence}
+        </p>
+      </div>
+    );
+  }
+
+  // Stacks below `sm`. Side-by-side needs room for both halves, and a figure like
+  // "Revenue growth (YoY): 0.7068" cannot shrink — on a phone it would either overflow the
+  // card or crush the claim into a one-word column, which is the same failure the news
+  // rows had.
+  return (
+    <div className="flex flex-col gap-0.5 border-b border-ink-800/60 py-2 last:border-b-0 sm:flex-row sm:items-baseline sm:gap-3">
+      <span className="min-w-0 flex-1 text-[13px] leading-relaxed text-ink-300">{finding.claim}</span>
+      <div className="flex items-baseline gap-2 sm:shrink-0">
+        <span className="font-mono text-[12px] tabular-nums text-ink-400">{finding.evidence}</span>
+        <SourceLink source={finding.source} />
+      </div>
+    </div>
+  );
+}
+
+function Skeleton() {
+  return (
+    <div className="space-y-2 py-1">
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="h-3 animate-pulse rounded bg-ink-800/70" style={{ width: `${88 - i * 16}%` }} />
+      ))}
+    </div>
+  );
+}
+
 export function AgentCard({ agent, state }: { agent: AgentName; state?: AgentState }) {
-  const status = state?.status ?? "queued";
+  // No `?? "queued"` fallback: this component is only rendered for agents the turn
+  // actually dispatched, and every dispatched agent gets an `agent_started` event before
+  // any of them finish. An absent state means the event hasn't landed yet, which is
+  // running, not pending.
+  const status = state?.status ?? "running";
 
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-3">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-semibold text-slate-300">{LABELS[agent]}</span>
-        <span
-          className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${STATUS_STYLES[status]} ${
-            status === "running" ? "animate-pulse" : ""
-          }`}
-        >
-          {STATUS_LABELS[status]}
-        </span>
+    <section className="border-t border-ink-800 pt-3 first:border-t-0 first:pt-0">
+      <div className="mb-2 flex items-center gap-2">
+        <h4 className="text-[11px] font-semibold uppercase tracking-wider text-ink-500">
+          {LABELS[agent]}
+        </h4>
+        {status === "running" && (
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" aria-label="running" />
+        )}
+        {status === "failed" && (
+          <span className="text-[11px] font-medium text-rose-400">unavailable</span>
+        )}
       </div>
 
+      {status === "running" && <Skeleton />}
+
       {status === "failed" && state?.error && (
-        <p className="mt-2 text-xs text-rose-400" title={state.error}>
+        <p className="text-[13px] leading-relaxed text-rose-400/90" title={state.error}>
           {friendlyError(state.error)}
         </p>
       )}
 
       {status === "ok" && (
         <>
-          {state?.summary && <p className="mt-2 text-xs leading-relaxed text-slate-400">{state.summary}</p>}
+          {state?.summary && (
+            <p className="mb-2 text-[13px] leading-relaxed text-ink-400">{state.summary}</p>
+          )}
           {!!state?.findings?.length && (
-            <div className="mt-2 overflow-hidden rounded-md border border-slate-800/80">
-              <table className="w-full border-collapse text-left text-[11px]">
-                <thead>
-                  <tr className="bg-slate-800/60 text-slate-400">
-                    <th className="px-2 py-1.5 font-medium">Claim</th>
-                    <th className="px-2 py-1.5 font-medium">Evidence</th>
-                    <th className="w-14 px-2 py-1.5 font-medium">Src</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {state.findings.map((f) => (
-                    <tr key={f.id} className="border-t border-slate-800/80 align-top">
-                      <td className="px-2 py-1.5 font-medium text-slate-300">{f.claim}</td>
-                      <td className="px-2 py-1.5 text-slate-500">{f.evidence}</td>
-                      <td className="px-2 py-1.5">
-                        {f.source.url ? (
-                          <a
-                            href={f.source.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-indigo-400 hover:underline"
-                          >
-                            link
-                          </a>
-                        ) : (
-                          <span className="text-slate-600">—</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div>
+              {state.findings.map((f) => (
+                <FindingRow key={f.id} finding={f} />
+              ))}
             </div>
           )}
         </>
       )}
-    </div>
+    </section>
   );
 }
