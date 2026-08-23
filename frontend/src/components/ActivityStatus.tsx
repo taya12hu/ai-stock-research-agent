@@ -1,93 +1,69 @@
+import { ResearchSteps, SynthesisStep, findingsTotal } from "./ProgressTimeline";
 import { TickerGroup } from "./TickerGroup";
-import type { AgentName, QueryType, TranscriptEntry } from "../types";
+import type { TranscriptEntry } from "../types";
 
-const QUERY_TYPE_LABELS: Record<QueryType, string> = {
-  single: "Single-stock analysis",
-  portfolio: "Portfolio analysis",
-  comparison: "Comparison",
-};
-
-const AGENTS: AgentName[] = ["fundamentals", "technical", "news"];
-
-function agentsSettled(entry: TranscriptEntry): boolean {
-  if (entry.tickers.length === 0) return false;
-  return entry.tickers.every((ticker) =>
-    AGENTS.every((agent) => {
-      const status = entry.agents[ticker]?.[agent]?.status;
-      return status === "ok" || status === "failed";
-    }),
+// A finished turn keeps one line where the steps were. They mattered while they were
+// happening; afterwards they are history, and leaving the full list above every past
+// answer turns a three-question scrollback into a wall of ticked-off process.
+function CompletedSummary({ entry }: { entry: TranscriptEntry }) {
+  const n = findingsTotal(entry);
+  return (
+    <div className="flex items-center gap-2 text-[12px] text-ink-500">
+      <svg viewBox="0 0 12 12" className="h-3 w-3 shrink-0 text-blue-400/60" aria-hidden="true">
+        <path
+          d="M2.5 6.2 L4.8 8.5 L9.5 3.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <span>
+        Researched {entry.tickers.join(", ")}
+        {n > 0 && ` · ${n} findings`}
+      </span>
+    </div>
   );
 }
 
-interface Phase {
-  key: string;
-  label: string;
-}
-
-// The single thing the graph is doing for this turn right now, in the order the SSE
-// events actually arrive (build_graph.py's routing) — each new phase fully replaces the
-// last one on screen, there's no accumulated history of prior phases. Only called before
-// this turn has content (see ActivityStatus below), so the phase returned is always still
-// in progress.
-function currentPhase(entry: TranscriptEntry): Phase {
-  if (!entry.classified) return { key: "understand", label: "Reading your question" };
-
-  if (entry.tickers.length > 0) {
-    if (agentsSettled(entry)) return { key: "synthesize", label: "Writing the final report" };
-
-    const hasAgentData = Object.keys(entry.agents).length > 0;
-    // A follow-up's tickers arrive with no query-type label to show alongside them, so
-    // there's nothing distinct to say between "classified" and "researching" — go
-    // straight to the research phase rather than manufacturing an empty-looking one.
-    if (hasAgentData || !entry.queryType) return { key: "research", label: `Researching ${entry.tickers.join(", ")}` };
-
-    return { key: "setup", label: `${QUERY_TYPE_LABELS[entry.queryType]} — ${entry.tickers.join(", ")}` };
-  }
-
-  // Classified with no tickers: a clarification question, an off-topic reply, an
-  // unresolvable ticker, or a follow-up answered straight from context.
-  return { key: "reply", label: "Preparing your reply" };
-}
-
-function Spinner() {
-  return <span className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-slate-700 border-t-indigo-400" />;
-}
-
-// Two different things live here, and they behave differently:
-//   - The ticker/agent findings table is real content — once an agent has posted
-//     anything, it stays on screen, report or no report. It's not process chrome.
-//   - The status line (spinner + "Researching…" / "Writing the final report") is pure
-//     process narration — one line that fully replaces itself as SSE events arrive
-//     (Claude-style "what am I doing right now"), and it disappears the instant there's
-//     an actual result to show instead, because at that point there's nothing left to
-//     narrate.
+// The turn's process and its output, interleaved in the order they actually happen:
+//
+//   steps so far  ->  the cards those steps produced  ->  the step that comes next
+//
+// That ordering is the whole point. Rendering the steps as one block meant the live
+// status sat at the top while results grew underneath it, so the thing you most wanted to
+// see was the thing furthest from where you were looking. Here the active step is always
+// the last element of the turn.
+//
+// Nothing outside `entry` is read, so a turn's progress can never render against another
+// turn's state.
 export function ActivityStatus({ entry, active }: { entry: TranscriptEntry; active: boolean }) {
   const contentReady = entry.report !== null || entry.answer !== null;
   const hasResearchData = Object.keys(entry.agents).length > 0;
+  const showSteps = !contentReady && active;
 
-  const showStatusLine = !contentReady && active;
-  const phase = showStatusLine ? currentPhase(entry) : null;
+  if (!hasResearchData && !showSteps) return null;
 
-  if (!hasResearchData && !phase) return null;
+  const cards = hasResearchData && (
+    <div className="space-y-2">
+      {entry.tickers.map((ticker) => (
+        <TickerGroup
+          key={ticker}
+          ticker={ticker}
+          agents={entry.agents[ticker] ?? {}}
+          collapsed={contentReady}
+        />
+      ))}
+    </div>
+  );
 
-  // The findings (when there's anything to show yet) come first — that's the actual
-  // content accumulating in real time. The status line, when there is one, trails
-  // underneath it as a caption, not a header sitting above content that isn't there yet.
   return (
-    <div>
-      {hasResearchData && (
-        <div className="space-y-3">
-          {entry.tickers.map((ticker) => (
-            <TickerGroup key={ticker} ticker={ticker} agents={entry.agents[ticker] ?? {}} />
-          ))}
-        </div>
-      )}
-      {phase && (
-        <div className={`flex items-center gap-2 text-sm font-medium text-slate-200 ${hasResearchData ? "mt-2" : ""}`}>
-          <Spinner />
-          <span>{phase.label}</span>
-        </div>
-      )}
+    <div className="space-y-3">
+      {showSteps && <ResearchSteps entry={entry} />}
+      {contentReady && hasResearchData && <CompletedSummary entry={entry} />}
+      {cards}
+      {showSteps && <SynthesisStep entry={entry} />}
     </div>
   );
 }

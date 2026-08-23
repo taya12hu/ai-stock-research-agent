@@ -86,6 +86,30 @@ def plan_turn(
     if intent.screening_scope and not resolution.subjects:
         return _chat(turn, replies.screening(intent.screening_scope, extracted_names))
 
+    # ── Pure social courtesy: a greeting or a thank-you with nothing else in it.
+    #
+    # Ahead of every other conversational branch, because the alternative is the
+    # off-domain decline, and "hi" answered with "That's not something I can help with"
+    # is both wrong and unfriendly — no request was made, so there is nothing to refuse.
+    #
+    # Guarded on there being nothing to research and no off-domain topic, so a message
+    # that merely opens politely ("hi, can you analyse Apple?", "thanks, now what about
+    # AMD?") still takes its real path. The classifier is told to answer 'none' whenever
+    # any part of the message asks for something; these guards make a wrong 'greeting'
+    # harmless rather than silently swallowing a question.
+    if (
+        intent.pleasantry != "none"
+        and not resolution.subjects
+        and not resolution.unclear
+        and not intent.off_domain_topic
+    ):
+        reply = (
+            replies.greeting(tickers)
+            if intent.pleasantry == "greeting"
+            else replies.acknowledgement(tickers)
+        )
+        return _chat(turn, reply)
+
     # ── Named companies, none survived validation. This must NOT fall through to the
     # ladder: inheriting `last_scope` here would answer about a company the user didn't
     # ask about, which is worse than admitting we couldn't find the one they did.

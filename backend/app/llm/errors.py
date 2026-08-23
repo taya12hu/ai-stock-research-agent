@@ -14,8 +14,8 @@ class LLMAnalysisError(Exception):
 # message once you've actually seen it happen (a day's Groq token quota is easy to hit
 # during heavy testing) — a vague "unavailable" reads as broken; this reads as temporary.
 RATE_LIMIT_MESSAGE = (
-    "I'm temporarily rate-limited by the AI provider and can't process this right now — "
-    "please try again in a few minutes."
+    "I'm temporarily rate-limited by the AI provider and can't process this right now. "
+    "Please try again in a few minutes."
 )
 
 

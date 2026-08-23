@@ -157,8 +157,15 @@ async def _publish_for_node(session_id: str, node_name: str, update: dict[str, A
         # `shape` and `scope` map onto the existing wire fields: the frontend's "query
         # type" header and per-ticker agent cards mean exactly this, so the format is
         # unchanged even though the state behind it is entirely different.
+        #
+        # `aspects` is deliberately NOT sent. The UI needs to know which analyses are
+        # running, and that is the `agent_started` events below — the cells this turn
+        # actually dispatched. `aspects` is what the user asked about, which differs
+        # whenever a follow-up re-fetches only what went stale, so publishing it invited
+        # the UI to render agents that were never going to run.
         await session_bus.publish(
-            session_id, ev.router_completed(turn.get("shape", ""), turn.get("scope", []), turn.get("notes", []))
+            session_id,
+            ev.router_completed(turn.get("shape", ""), turn.get("scope", []), turn.get("notes", [])),
         )
         for cell in turn.get("fetch", []):
             await session_bus.publish(session_id, ev.agent_started(cell["ticker"], cell["agent"]))

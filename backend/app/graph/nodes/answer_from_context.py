@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 
-from app.graph.nodes._synthesis_shared import ticker_section_block
+from app.graph.nodes._synthesis_shared import PROSE_STYLE, ticker_section_block
 from app.graph.session import SessionState, TurnOutput
 from app.llm.errors import RATE_LIMIT_MESSAGE, is_rate_limited
 from app.llm.groq_client import get_chat_model
@@ -54,7 +54,7 @@ def _build_prompt(state: SessionState) -> str:
         "it, say so plainly rather than guessing or inventing facts. If asked for a "
         "buy/sell/hold view, give one grounded only in these findings, with a brief "
         "rationale and a confidence qualifier, and note that it is not personalized "
-        "financial advice.\n\n"
+        f"financial advice.{PROSE_STYLE}\n\n"
         f"This answer covers: {join_human(scope)}\n\n"
         f"Research gathered for those companies:\n{blocks}\n\n"
         f"Recent conversation:\n{history}\n\n"

@@ -40,7 +40,11 @@ interface VerdictMatch {
 // LLM wrote "–" and it fell through, leaving a stray leading dash on the rationale) —
 // same bug shape as the ticker-length cap, fixed the same way: stop guessing which
 // characters to allow and use the actual rule.
-const SEPARATOR = String.raw`[\s.:\p{Pd}]*`;
+// Comma included alongside the dash category because `normalizePunctuation` below rewrites a
+// spaced dash to ", " before this ever runs — so the separator this pattern most often
+// meets is now a comma, not a dash. The dash forms stay for reports rendered from
+// history, and for the case where the model ignores the style instruction.
+const SEPARATOR = String.raw`[\s.:,\p{Pd}]*`;
 const PLAIN_VERDICT = new RegExp(String.raw`^Verdict:\s*(Buy|Sell|Hold)\b${SEPARATOR}(.*)$`, "iu");
 // No upper bound on ticker length: what actually rules out a false positive is the
 // character class (all-caps/digits/dots only — no spaces, so it can never match a
@@ -68,14 +72,14 @@ function VerdictCallout({ match }: { match: VerdictMatch }) {
   return (
     <div className="my-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
       {!match.ticker && (
-        <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-slate-500">Verdict</span>
+        <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-ink-500">Verdict</span>
       )}
       <span
         className={`shrink-0 rounded-full border px-2.5 py-0.5 text-xs font-bold uppercase tracking-wide ${VERDICT_STYLES[match.verdict]}`}
       >
         {match.ticker ? `${match.ticker} · ${match.verdict}` : match.verdict}
       </span>
-      {match.rationale && <span className="text-sm leading-relaxed text-slate-300">{match.rationale}</span>}
+      {match.rationale && <span className="text-sm leading-relaxed text-ink-300">{match.rationale}</span>}
     </div>
   );
 }
@@ -102,24 +106,24 @@ function countSources(sources: string): number {
 
 const components = {
   table: ({ children }: { children?: React.ReactNode }) => (
-    <div className="my-4 overflow-x-auto rounded-lg border border-slate-800">
+    <div className="my-4 overflow-x-auto rounded-lg border border-ink-800">
       <table className="w-full border-collapse text-sm">{children}</table>
     </div>
   ),
   thead: ({ children }: { children?: React.ReactNode }) => (
-    <thead className="bg-slate-800/70">{children}</thead>
+    <thead className="bg-ink-800/70">{children}</thead>
   ),
   th: ({ children }: { children?: React.ReactNode }) => (
-    <th className="border-b border-slate-800 px-3 py-2 text-left font-semibold text-slate-300">
+    <th className="border-b border-ink-800 px-3 py-2 text-left font-semibold text-ink-300">
       {children}
     </th>
   ),
   td: ({ children }: { children?: React.ReactNode }) => (
-    <td className="border-b border-slate-800/60 px-3 py-2 align-top text-slate-400">{children}</td>
+    <td className="border-b border-ink-800/60 px-3 py-2 align-top text-ink-400">{children}</td>
   ),
   tr: ({ children }: { children?: React.ReactNode }) => <tr className="last:[&>td]:border-b-0">{children}</tr>,
   code: ({ children }: { children?: React.ReactNode }) => (
-    <code className="rounded bg-slate-800 px-1 py-0.5 text-[0.85em] text-indigo-300">{children}</code>
+    <code className="rounded bg-ink-800 px-1 py-0.5 text-[0.85em] text-blue-300">{children}</code>
   ),
   p: ({ children }: { children?: ReactNode }) => {
     const match = parseVerdictLine(flattenText(children));
@@ -137,35 +141,55 @@ const components = {
   },
   h2: ({ children }: { children?: ReactNode }) =>
     isVerdictHeading(flattenText(children)) ? (
-      <h2 className="mb-1 mt-5 text-xs font-bold uppercase tracking-widest text-slate-500">{children}</h2>
+      <h2 className="mb-1 mt-5 text-xs font-bold uppercase tracking-widest text-ink-500">{children}</h2>
     ) : (
       <h2>{children}</h2>
     ),
   h3: ({ children }: { children?: ReactNode }) =>
     isVerdictHeading(flattenText(children)) ? (
-      <h3 className="mb-1 mt-5 text-xs font-bold uppercase tracking-widest text-slate-500">{children}</h3>
+      <h3 className="mb-1 mt-5 text-xs font-bold uppercase tracking-widest text-ink-500">{children}</h3>
     ) : (
       <h3>{children}</h3>
     ),
 };
 
+// Backstop to the PROSE_STYLE instruction in the synthesis prompts. The instruction is
+// the real fix (it changes what gets written); this catches the cases where the model
+// ignores it, and repairs reports already saved to chat history from before that
+// instruction existed.
+//
+// Dashes: only one with whitespace on BOTH sides is rewritten. That is the
+// parenthetical-aside usage, which is what reads as machine-written. A tight dash is
+// almost always a range ("2020–2024") or a compound, and turning those into commas would
+// corrupt real data.
+//
+// Brackets: the model occasionally emits citations as 【id】 rather than [id]. Those are
+// real citation ids, just wrongly punctuated, so folding them back into ASCII brackets
+// renders them correctly instead of leaking full-width brackets into the report.
+function normalizePunctuation(markdown: string): string {
+  return markdown
+    .replace(/ +[—–] +/g, ", ")
+    .replace(/【/g, "[")
+    .replace(/】/g, "]");
+}
+
 export function Markdown({ children, className = "" }: { children: string; className?: string }) {
-  const { body, sources } = splitSources(children);
+  const { body, sources } = splitSources(normalizePunctuation(children));
 
   return (
     <div
-      className={`prose prose-sm prose-invert max-w-none prose-headings:font-semibold prose-headings:text-slate-100 prose-p:text-slate-300 prose-strong:text-slate-100 prose-a:text-indigo-400 prose-blockquote:border-slate-700 prose-blockquote:text-slate-400 prose-hr:border-slate-800 prose-li:text-slate-300 ${className}`}
+      className={`prose prose-sm prose-invert max-w-none prose-headings:font-display prose-headings:font-semibold prose-headings:tracking-tight prose-headings:text-ink-100 prose-p:text-ink-300 prose-strong:text-ink-100 prose-a:text-blue-400 prose-blockquote:border-ink-700 prose-blockquote:text-ink-400 prose-hr:border-ink-800 prose-li:text-ink-300 ${className}`}
     >
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {body}
       </ReactMarkdown>
 
       {sources && (
-        <details className="mt-4 rounded-lg border border-slate-800/80">
-          <summary className="cursor-pointer select-none rounded-lg px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-300">
+        <details className="mt-4 rounded-lg border border-ink-800/80">
+          <summary className="cursor-pointer select-none rounded-lg px-3 py-2 text-xs font-semibold uppercase tracking-wide text-ink-500 hover:text-ink-300">
             Sources ({countSources(sources)})
           </summary>
-          <div className="border-t border-slate-800/80 px-3 py-2">
+          <div className="border-t border-ink-800/80 px-3 py-2">
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
               {sources}
             </ReactMarkdown>

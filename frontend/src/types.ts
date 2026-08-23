@@ -3,7 +3,10 @@
 
 export type AgentName = "fundamentals" | "technical" | "news";
 export type QueryType = "single" | "portfolio" | "comparison";
-export type AgentStatus = "queued" | "running" | "ok" | "failed";
+// No "queued": the backend publishes `agent_started` for every dispatched cell up front,
+// so an agent is either running or settled. There is no observable pending state, and
+// inventing one produced placeholder cards for analyses the turn never requested.
+export type AgentStatus = "running" | "ok" | "failed";
 
 export interface Source {
   type: "market_data" | "web";
@@ -73,6 +76,10 @@ export interface TranscriptEntry {
   report: string | null;
   queryType: QueryType | null;
   tickers: string[];
+  // Keyed by ticker, then by agent. Only the cells this turn dispatched ever appear here,
+  // because entries are created by `agent_started` — which makes this the authoritative
+  // answer to "what is this turn running", and the set both the progress steps and the
+  // ticker cards render from.
   agents: Record<string, TickerAgents>;
   notes: string[];
   error: string | null;

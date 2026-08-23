@@ -23,8 +23,11 @@ def _rate_limit_error() -> groq.RateLimitError:
     return groq.RateLimitError("rate limited", response=response, body=body)
 
 
+# The doubles expose `ainvoke`, not `invoke`, because that is what the specialists call.
+# The synchronous form blocked the event loop and serialized the parallel `Send` branches;
+# a double that only implements `invoke` would let that regress silently.
 class _RateLimitedLLM:
-    def invoke(self, prompt: str) -> NodeAnalysis:  # noqa: ARG002
+    async def ainvoke(self, prompt: str) -> NodeAnalysis:  # noqa: ARG002
         raise _rate_limit_error()
 
 
@@ -34,7 +37,7 @@ class _FakeStructuredLLM:
         self._error_code = error_code
         self.call_count = 0
 
-    def invoke(self, prompt: str) -> NodeAnalysis:  # noqa: ARG002
+    async def ainvoke(self, prompt: str) -> NodeAnalysis:  # noqa: ARG002
         self.call_count += 1
         if self.call_count <= self._calls_before_success:
             raise _bad_request_error(self._error_code)
