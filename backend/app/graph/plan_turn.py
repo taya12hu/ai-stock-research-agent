@@ -153,8 +153,20 @@ def _resolve_scope(
 
     Rung order is the whole design; see the module docstring.
     """
-    # 1. Companies named in THIS message. Always wins — nothing is inherited.
+    # 1. Companies named in THIS message. Always wins — nothing is inherited *unless* the
+    #    message says it is adding to what's already in play ("now also add Intel to this
+    #    comparison"), in which case the previous scope is part of what was named.
+    #
+    #    Both directions matter and they pull opposite ways. Replacing unconditionally is
+    #    what makes narrowing work — "how is NVDA doing on its own" must not drag AMD along
+    #    (A-01). But it also silently broke widening: "add Intel to this comparison"
+    #    produced a single-company report about Intel, dropping the two companies the user
+    #    was comparing. Which one is meant is a fact about the sentence, so the model
+    #    reports it and this rung acts on it.
     if candidates:
+        if intent.extends_prior_scope:
+            last_scope = [t for t in (state.get("last_scope") or []) if t in tickers]
+            return list(dict.fromkeys([*last_scope, *candidates]))
         return list(dict.fromkeys(candidates))
 
     # 2. A backward reference resolves against the PREVIOUS TURN's scope, not the

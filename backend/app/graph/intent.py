@@ -101,6 +101,18 @@ class TurnIntent(BaseModel):
             "name a scope, not a company — leave this empty and set screening_scope."
         ),
     )
+    extends_prior_scope: bool = Field(
+        default=False,
+        description=(
+            "True when the message ADDS the companies it names to the ones already being "
+            "discussed, instead of switching to them. 'Now also add Intel to this "
+            "comparison', 'compare that with Intel too', 'and Microsoft?' all extend.\n\n"
+            "False when it replaces: 'How is NVDA doing on its own', 'what about Intel "
+            "instead', or a plain 'Analyze Intel'. Also false when no company is named.\n\n"
+            "The usual signals are words like 'also', 'too', 'add', 'as well', or naming "
+            "the existing set — 'this comparison', 'these', 'the others'."
+        ),
+    )
     refers_to_prior: bool = Field(
         default=False,
         description=(

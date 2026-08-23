@@ -108,6 +108,7 @@ def _intent_from_spec(spec: dict[str, Any]) -> TurnIntent:
             )
             for c in (spec.get("companies") or [])
         ],
+        extends_prior_scope=spec.get("extends_prior_scope", False),
         refers_to_prior=spec.get("refers_to_prior", False),
         screening_scope=spec.get("screening_scope"),
         shape_hint=spec.get("shape_hint", "none"),
@@ -172,6 +173,11 @@ def _check_intent(intent: TurnIntent, expect: dict[str, Any]) -> list[str]:
     if "company_count" in expect and len(intent.companies or []) != expect["company_count"]:
         failures.append(
             f"company_count: expected {expect['company_count']}, got {len(intent.companies or [])}"
+        )
+    if "extends_prior_scope" in expect and intent.extends_prior_scope != expect["extends_prior_scope"]:
+        failures.append(
+            f"extends_prior_scope: expected {expect['extends_prior_scope']}, "
+            f"got {intent.extends_prior_scope}"
         )
     if "refers_to_prior" in expect and intent.refers_to_prior != expect["refers_to_prior"]:
         failures.append(

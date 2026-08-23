@@ -545,3 +545,46 @@
     kind: recall
     scope: [AMD]
     shape: single
+
+- id: adding_a_company_extends_the_current_comparison
+  kind: classify
+  why: >
+    The counterpart to the narrowing fix, and its opposite failure. Replacing scope
+    unconditionally is what lets "how is NVDA doing on its own" drop AMD (A-01) — but
+    applied to "now also add Intel to this comparison" it produced a single-company report
+    about Intel and dropped the two companies being compared. Which of the two is meant is
+    a fact about the sentence, so the model reports it via extends_prior_scope.
+  question: "Now also add Intel to this comparison"
+  session:
+    researched: {NVDA: fresh, AMD: fresh}
+    last_scope: [NVDA, AMD]
+    last_shape: comparison
+    conversation:
+      - {role: user, content: "Compare NVIDIA and AMD"}
+      - {role: assistant, content: "...", gist: "(comparison report on NVDA, AMD)"}
+  resolve: {INTC: INTC}
+  expect_intent:
+    extends_prior_scope: true
+  expect:
+    kind: research
+    scope: [NVDA, AMD, INTC]
+    shape: comparison
+    fetch: ["INTC:fundamentals", "INTC:news", "INTC:technical"]
+
+- id: narrowing_does_not_extend_the_scope
+  kind: classify
+  why: >
+    Guard against over-correcting the case above — the A-01 narrowing behaviour has to keep
+    working, and it is the same shape of message with the opposite intent.
+  question: "How is NVDA doing on its own right now?"
+  session:
+    researched: {NVDA: fresh, AMD: fresh}
+    last_scope: [NVDA, AMD]
+    last_shape: comparison
+  resolve: {NVDA: NVDA}
+  expect_intent:
+    extends_prior_scope: false
+  expect:
+    kind: recall
+    scope: [NVDA]
+    shape: single

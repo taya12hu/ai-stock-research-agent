@@ -51,6 +51,7 @@ def _intent(
     *,
     companies: list[tuple[str, str]] | None = None,
     refers_to_prior: bool = False,
+    extends_prior_scope: bool = False,
     screening_scope: str | None = None,
     shape_hint: str = "none",
     aspects: list[str] | None = None,
@@ -61,6 +62,7 @@ def _intent(
             CompanyRef(name=n, role=r, ticker=n.upper()) for n, r in (companies or [])
         ],
         refers_to_prior=refers_to_prior,
+        extends_prior_scope=extends_prior_scope,
         screening_scope=screening_scope,
         shape_hint=shape_hint,
         aspects=aspects or [],
@@ -588,3 +590,51 @@ def test_clarify_and_chat_turns_never_carry_a_fetch_list() -> None:
         )
         assert plan["fetch"] == []
         assert plan["kind"] in ("chat", "clarify")
+
+
+def test_adding_a_company_extends_the_previous_scope_rather_than_replacing_it() -> None:
+    """The counterpart to the narrowing fix, and its opposite failure.
+
+    Replacing scope unconditionally is what lets "how is NVDA doing on its own" drop AMD
+    (A-01) — but applied to "now also add Intel to this comparison" it produced a
+    single-company report about Intel and silently dropped the two companies being
+    compared. Which of the two is meant is a fact about the sentence, not a default.
+    """
+    state = _state(
+        researched={"NVDA": _cells(), "AMD": _cells()},
+        last_scope=["NVDA", "AMD"],
+        last_shape="comparison",
+    )
+    plan = plan_turn(
+        intent=_intent(
+            companies=[("Intel", "research_subject")],
+            extends_prior_scope=True,
+            shape_hint="comparison",
+        ),
+        resolution=ScopeResolution(subjects=["INTC"], attempted=True),
+        state=state,
+        now=NOW,
+    )
+
+    assert plan["scope"] == ["NVDA", "AMD", "INTC"]
+    assert plan["shape"] == "comparison"
+    # Only the new company needs fetching; the other two are already fresh.
+    assert _fetch_pairs(plan) == {("INTC", a) for a in AGENT_NAMES}
+
+
+def test_naming_a_company_without_extending_still_replaces_the_scope() -> None:
+    """Guard against over-correcting: the A-01 narrowing case must keep working."""
+    state = _state(
+        researched={"NVDA": _cells(), "AMD": _cells()},
+        last_scope=["NVDA", "AMD"],
+        last_shape="comparison",
+    )
+    plan = plan_turn(
+        intent=_intent(companies=[("NVDA", "research_subject")], extends_prior_scope=False),
+        resolution=ScopeResolution(subjects=["NVDA"], attempted=True),
+        state=state,
+        now=NOW,
+    )
+
+    assert plan["scope"] == ["NVDA"]
+    assert plan["shape"] == "single"
