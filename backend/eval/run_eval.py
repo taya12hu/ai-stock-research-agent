@@ -175,25 +175,47 @@ async def main(limit: int | None, only: list[str] | None) -> None:
     checkpointer = InMemorySaver()
     graph = build_research_graph(checkpointer=checkpointer)
 
-    case_results = []
-    for case in cases:
-        print(f"Running case: {case['id']}...", flush=True)
-        case_result = await run_case(graph, case)
-        case_results.append(case_result)
-        failed_hard = [c["name"] for c in case_result["checks"] if c["hard"] and not c["passed"]]
-        status = "PASS" if case_result["passed_hard_checks"] else f"FAIL ({', '.join(failed_hard)})"
-        print(f"  {status} | judge: {case_result['judge']}")
-
-    summary = _summarize(case_results)
-
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / f"eval_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-    out_path.write_text(json.dumps(summary, indent=2, default=str))
+
+    case_results: list[dict[str, Any]] = []
+    for case in cases:
+        print(f"Running case: {case['id']}...", flush=True)
+        try:
+            case_result = await run_case(graph, case)
+        except Exception as exc:  # noqa: BLE001 - one bad case must not discard the rest
+            case_result = {
+                "id": case["id"], "question": case["question"], "turns": [],
+                "checks": [], "judge": {"error": str(exc)},
+                "passed_hard_checks": False, "errored": str(exc),
+            }
+        case_results.append(case_result)
+        failed_hard = [c["name"] for c in case_result["checks"] if c["hard"] and not c["passed"]]
+        status = "PASS" if case_result["passed_hard_checks"] else f"FAIL ({', '.join(failed_hard) or 'errored'})"
+        print(f"  {status} | judge: {case_result['judge']}")
+
+        # Rewritten after every case, not once at the end. A full run takes hours under
+        # provider rate limiting — 36 rate-limit hits and two retries per call in the
+        # observed case — and both attempts at a clean baseline so far have died partway
+        # (quota exhaustion once, the process killed at case 18 the next time), each losing
+        # every result it had already computed. Whatever completed should survive whatever
+        # comes next.
+        _write(out_path, _summarize(case_results), complete=False)
+
+    summary = _summarize(case_results)
+    _write(out_path, summary, complete=True)
 
     print(f"\nWrote results to {out_path}")
     print(f"Hard-check pass rate: {summary['hard_checks_pass_rate']:.0%}")
     print(f"Avg judge scores: {summary['avg_judge_scores']}")
     print(f"Avg latency: {summary['avg_latency_seconds']}s")
+
+
+def _write(path: Path, summary: dict[str, Any], *, complete: bool) -> None:
+    """`complete` marks whether every requested case ran. A partial file is useful for
+    reading what happened, but must never be mistaken for a baseline to diff against.
+    """
+    path.write_text(json.dumps({**summary, "complete": complete}, indent=2, default=str))
 
 
 if __name__ == "__main__":

@@ -65,6 +65,15 @@ async def resolve_scope(intent: TurnIntent, known_tickers: list[str]) -> ScopeRe
                 resolved.append(found.symbol)
             elif found.unsupported_market:
                 notes.append(f"'{raw}' isn't a US-listed stock, so it isn't currently supported.")
+            elif found.provider_unavailable:
+                # We never learned whether this symbol is valid — the market-data provider
+                # was throttling. Saying "could not be found" here would tell the user a
+                # real company doesn't exist, which is the same mistake the US-coverage
+                # note above exists to avoid.
+                notes.append(
+                    f"I couldn't look up '{raw}' just now — the market data provider was "
+                    "rate-limiting. Worth trying again in a minute."
+                )
             else:
                 notes.append(f"'{raw}' could not be found and was skipped.")
         return list(dict.fromkeys(resolved))

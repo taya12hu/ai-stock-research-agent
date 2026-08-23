@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
+import requests
 
 from app.tools import market_data, web_search
 from app.tools.errors import WebSearchError, MarketDataError
@@ -574,3 +575,63 @@ async def test_asearch_news_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     results = await web_search.asearch_news("NVIDIA stock news")
 
     assert len(results) == 1
+
+
+def _http_error(status: int) -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status
+    return requests.HTTPError(f"{status} error", response=response)
+
+
+def test_throttled_lookup_is_not_reported_as_a_missing_company(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Found by an eval run against live providers.
+
+    Twelve Data's free tier allows roughly 8 requests a minute, so a burst of parallel
+    agents exhausts all four retries. `_is_fully_usable` then swallowed the 429 into
+    "not usable", so the ticker was dropped and the user was told a real company could
+    not be found — the same misreport `unsupported_market` exists to prevent.
+    """
+    def _raise(ticker: str, period: str) -> object:  # noqa: ARG001
+        raise _http_error(429)
+
+    monkeypatch.setattr(market_data, "_fetch_history", _raise)
+
+    resolved = market_data.resolve_ticker("GOOGL")
+
+    assert resolved.symbol is None
+    assert resolved.provider_unavailable is True
+    assert resolved.unsupported_market is False
+
+
+def test_a_genuinely_absent_symbol_is_still_reported_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other side: an empty result means we asked and the answer was no, which must
+    not be softened into "we couldn't check".
+    """
+    monkeypatch.setattr(market_data, "_fetch_history", lambda t, p: pd.DataFrame())  # noqa: ARG005
+
+    resolved = market_data.resolve_ticker("ZZZINVALID")
+
+    assert resolved.symbol is None
+    assert resolved.provider_unavailable is False
+
+
+def test_unsupported_market_wins_over_throttling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`resolve_ticker` tries the bare symbol then exchange suffixes, so one lookup can
+    be throttled while another returns a real coverage answer. The coverage answer is the
+    actual reason and should be what the user hears.
+    """
+    def _mixed(ticker: str, period: str):  # noqa: ARG001
+        if ticker.endswith(".NS"):
+            raise market_data._UnsupportedMarketError(ticker)
+        raise _http_error(429)
+
+    monkeypatch.setattr(market_data, "_fetch_history", _mixed)
+
+    resolved = market_data.resolve_ticker("TCS")
+
+    assert resolved.unsupported_market is True
+    assert resolved.provider_unavailable is False

@@ -12,9 +12,15 @@ Design notes:
   Data returns `status: "error"`. Validity is therefore checked on the *shape of the
   returned data*, not on exceptions, and that contract is normalised across both providers
   so callers never need to know which one a function talks to.
-- Retries apply only to transient network errors and Twelve Data rate limits, never to
-  "ticker doesn't exist" — that is permanent, and retrying it would burn free-tier quota
+- Retries cover transient failures — network trouble, provider 5xx, 429 throttling —
+  but never "ticker doesn't exist", which is permanent and would burn free-tier quota
   for a guaranteed identical failure.
+- Throttling that outlives its retries is reported as `provider_unavailable`, not
+  folded into "not found". Twelve Data's free tier allows roughly 8 requests a minute,
+  so a burst of parallel agents exhausts four retries routinely — and the caller then
+  has something true and different to tell the user. Saying a real company doesn't
+  exist because we were rate-limited is the exact mistake `unsupported_market` also
+  exists to avoid.
 - Every public fetch is wrapped in a short TTL cache (which also stops eval runs from
   hammering the provider) and, on the async side, a hard timeout.
 - Sync core with `asyncio.to_thread` wrappers, since neither provider's HTTP client is
@@ -60,12 +66,44 @@ _history_cache: TTLCache = TTLCache(maxsize=256, ttl=_CACHE_TTL_SECONDS)
 # is short-circuited separately in `_fetch_history` rather than being retried here.
 _RETRYABLE = (ConnectionError, TimeoutError, OSError)
 
+# Throttling and provider-side faults. Both free tiers are tight — Twelve Data allows
+# roughly 8 requests a minute — so a burst of parallel agents hits 429 routinely, and an
+# eval run hits it constantly.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _is_throttled_or_faulting(exc: BaseException) -> bool:
+    """Whether this failure means "the provider couldn't answer", as opposed to "the
+    provider answered, and the answer was no".
+
+    Not used to decide *whether* to retry — `_RETRYABLE` already covers these, since every
+    `requests` exception subclasses `OSError`. It is used by `_is_fully_usable` to classify
+    a failure that has already exhausted its retries, which is a different question and the
+    one that was being got wrong.
+    """
+    response = getattr(exc, "response", None)
+    return (
+        isinstance(exc, requests.HTTPError)
+        and response is not None
+        and response.status_code in _RETRYABLE_STATUS
+    )
+
+
 _retry_network = retry(
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1, min=1, max=6),
     retry=retry_if_exception_type(_RETRYABLE),
     reraise=True,
 )
+
+
+class _ProviderUnavailableError(Exception):
+    """The provider could not answer right now — throttled, or briefly broken.
+
+    Kept distinct from "this symbol isn't usable" for the same reason
+    `_UnsupportedMarketError` is: the caller has something honest and different to tell
+    the user, and conflating them means reporting a real company as nonexistent.
+    """
 
 
 @dataclass
@@ -224,7 +262,13 @@ def _is_fully_usable(ticker: str) -> bool:
         history = _fetch_history(ticker, "1y")
     except _UnsupportedMarketError:
         raise
-    except Exception as exc:  # noqa: BLE001 - any other fetch failure => not usable
+    except Exception as exc:  # noqa: BLE001
+        if _is_throttled_or_faulting(exc):
+            # Retries are already exhausted by the time this surfaces. Reporting it as
+            # "not usable" would tell the user a real company doesn't exist, so let the
+            # caller distinguish it — see `_ProviderUnavailableError`.
+            logger.warning("twelvedata unavailable for %r: %r", ticker, exc)
+            raise _ProviderUnavailableError(ticker) from exc
         logger.warning("twelvedata history fetch failed for %r: %r", ticker, exc)
         return False
     return history is not None and not history.empty
@@ -241,6 +285,10 @@ class ResolvedTicker(NamedTuple):
 
     symbol: str | None
     unsupported_market: bool = False
+    # The provider was throttling or briefly down, so we never actually learned whether
+    # this symbol is valid. Distinct from `symbol is None`, which means we asked and the
+    # answer was no.
+    provider_unavailable: bool = False
 
 
 def resolve_ticker(ticker: str) -> ResolvedTicker:
@@ -252,13 +300,22 @@ def resolve_ticker(ticker: str) -> ResolvedTicker:
     """
     ticker = ticker.strip().upper()
     saw_unsupported_market = False
+    saw_provider_unavailable = False
     for candidate in (ticker, *(f"{ticker}{suffix}" for suffix in _FALLBACK_SUFFIXES)):
         try:
             if _is_fully_usable(candidate):
                 return ResolvedTicker(candidate)
         except _UnsupportedMarketError:
             saw_unsupported_market = True
-    return ResolvedTicker(None, unsupported_market=saw_unsupported_market)
+        except _ProviderUnavailableError:
+            saw_provider_unavailable = True
+    # A real coverage answer beats "we couldn't check": if any variant told us this market
+    # isn't on the plan, that is the actual reason, not the throttling we also hit.
+    return ResolvedTicker(
+        None,
+        unsupported_market=saw_unsupported_market,
+        provider_unavailable=saw_provider_unavailable and not saw_unsupported_market,
+    )
 
 
 # --- technical indicator math -------------------------------------------------------
