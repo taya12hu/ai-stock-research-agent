@@ -2,7 +2,31 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover so the fixed backdrop reaches under a phone's notch/home bar;
+         the safe-area insets in index.css keep the chrome itself out of those regions. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#06080f" />
+    <meta
+      name="description"
+      content="Stock research from fundamentals, technicals and news. Every claim cited."
+    />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!-- Three faces, each doing one job:
+         Space Grotesk — the wordmark and headings. Geometric with unusual details, so the
+           product name reads as a name rather than as body copy set larger.
+         Inter        — all UI and prose. Designed for dense screen text at small sizes.
+         JetBrains Mono — figures and tickers. Its digits are the same width, which is what
+           lets the evidence column line up down the page.
+         preconnect matters here: without it the browser opens the gstatic connection only
+         after parsing the stylesheet, adding a round trip before any text can paint. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+
     <title>EquityLens</title>
   </head>
   <body>
