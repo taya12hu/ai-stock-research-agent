@@ -8,6 +8,21 @@ body,
   height: 100%;
 }
 
+/* The app shell's height, with a fallback that actually matters.
+   `100dvh` is what we want: it tracks the visible area as mobile browser chrome slides in
+   and out, and shrinks when the on-screen keyboard opens. But a browser that doesn't know
+   `dvh` DROPS THE WHOLE DECLARATION rather than approximating it, leaving `height: auto`
+   — the shell then grows to its content, the bottom-pinned composer is pushed below the
+   fold, and because the outer element is `overflow: hidden` nothing scrolls to reach it.
+   That is the "input box missing on some phones" bug: it depends on the browser, not the
+   screen size, which is why it looked intermittent.
+   Two declarations, cascade order doing the work: `vh` lands everywhere, `dvh` overrides
+   it wherever it is understood. This cannot be expressed as a single Tailwind arbitrary
+   value, which is why it lives here. */
+.app-shell {
+  height: 100vh;
+  height: 100dvh;
+}
 
 /* Flat base only. The gradients, arcs and market iconography that used to live here are
    now drawn by <BackgroundDecor /> as a fixed SVG layer — the CSS version couldn't render

@@ -1,3 +1,6 @@
+import { Logo } from "./Logo";
+import { Wordmark } from "./Wordmark";
+import { CHROME } from "../lib/surfaces";
 import type { ChatSummary } from "../lib/history";
 
 interface Props {
@@ -6,22 +9,58 @@ interface Props {
   onNewChat: () => void;
   onSelectChat: (sessionId: string) => void;
   onDeleteChat: (sessionId: string) => void;
+  // Drawer state, only meaningful below `md`. Above it the sidebar is a static column and
+  // these are ignored, which is why there is one component rather than two: the content
+  // and every handler are identical, only the container's positioning differs.
+  open: boolean;
+  onClose: () => void;
 }
 
-export function Sidebar({ history, activeSessionId, onNewChat, onSelectChat, onDeleteChat }: Props) {
+export function Sidebar({
+  history,
+  activeSessionId,
+  onNewChat,
+  onSelectChat,
+  onDeleteChat,
+  open,
+  onClose,
+}: Props) {
+  // Selecting a chat or starting a new one should dismiss the drawer — on a phone the
+  // sidebar covers the thing you just asked to see. Harmless above `md`, where `onClose`
+  // sets a flag nothing reads.
+  const select = (sessionId: string) => {
+    onSelectChat(sessionId);
+    onClose();
+  };
+  const newChat = () => {
+    onNewChat();
+    onClose();
+  };
+
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-slate-800/80 bg-slate-950/60 backdrop-blur">
+    <aside
+      className={`fixed inset-y-0 left-0 z-40 flex h-full w-64 shrink-0 flex-col border-r border-ink-800/60 transition-transform duration-200 md:static md:z-auto md:translate-x-0 ${CHROME} ${
+        open ? "translate-x-0" : "-translate-x-full"
+      }`}
+    >
       <div className="flex items-center gap-2 px-4 py-4">
-        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-gradient-to-br from-indigo-500 to-violet-600 text-sm font-bold text-white">
-          Σ
-        </div>
-        <span className="text-sm font-semibold tracking-wide text-slate-200">EquityLens</span>
+        <Logo className="h-7 w-7 shrink-0" />
+        <Wordmark className="text-[15px] text-ink-100" />
+        <button
+          onClick={onClose}
+          aria-label="Close menu"
+          className="ml-auto rounded-md p-1.5 text-ink-400 transition hover:bg-ink-800/70 hover:text-ink-100 md:hidden"
+        >
+          <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4">
+            <path d="M5 5l10 10M15 5L5 15" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+          </svg>
+        </button>
       </div>
 
       <div className="px-3">
         <button
-          onClick={onNewChat}
-          className="flex w-full items-center gap-2 rounded-lg border border-slate-700/80 px-3 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-600 hover:bg-slate-800/60"
+          onClick={newChat}
+          className="flex w-full items-center gap-2 rounded-lg border border-ink-700 px-3 py-2 text-sm font-medium text-ink-200 transition hover:border-blue-500/60 hover:bg-ink-800/70 hover:text-ink-100"
         >
           <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4">
             <path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
@@ -31,21 +70,24 @@ export function Sidebar({ history, activeSessionId, onNewChat, onSelectChat, onD
       </div>
 
       <div className="mt-4 flex-1 overflow-y-auto px-3 pb-4">
-        <p className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+        <p className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
           Recent
         </p>
         {history.length === 0 && (
-          <p className="px-1 text-xs text-slate-600">Your research sessions will show up here.</p>
+          <p className="px-1 text-xs text-ink-600">Your research sessions will show up here.</p>
         )}
         <ul className="space-y-0.5">
           {history.map((chat) => (
             <li key={chat.sessionId} className="group relative">
               <button
-                onClick={() => onSelectChat(chat.sessionId)}
-                className={`block w-full truncate rounded-lg px-3 py-2 pr-8 text-left text-sm transition ${
+                onClick={() => select(chat.sessionId)}
+                // The active row carries an indigo edge rather than only a lighter fill:
+                // against a translucent sidebar over a moving gradient, a fill alone
+                // shifts with whatever is behind it and stops reading as "selected".
+                className={`block w-full truncate rounded-lg border-l-2 px-3 py-2 pr-8 text-left text-sm transition ${
                   chat.sessionId === activeSessionId
-                    ? "bg-slate-800 text-slate-100"
-                    : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-200"
+                    ? "border-blue-500 bg-ink-800/80 text-ink-100"
+                    : "border-transparent text-ink-400 hover:bg-ink-800/50 hover:text-ink-200"
                 }`}
                 title={chat.title}
               >
@@ -57,7 +99,7 @@ export function Sidebar({ history, activeSessionId, onNewChat, onSelectChat, onD
                   onDeleteChat(chat.sessionId);
                 }}
                 aria-label="Delete chat"
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-slate-500 opacity-0 transition hover:bg-slate-700 hover:text-slate-200 group-hover:opacity-100"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-ink-500 opacity-0 transition hover:bg-rose-500/15 hover:text-rose-300 group-hover:opacity-100"
               >
                 <svg viewBox="0 0 20 20" fill="none" className="h-3.5 w-3.5">
                   <path
@@ -74,7 +116,7 @@ export function Sidebar({ history, activeSessionId, onNewChat, onSelectChat, onD
         </ul>
       </div>
 
-      <div className="border-t border-slate-800/80 px-4 py-3 text-[11px] text-slate-600">
+      <div className="border-t border-ink-800/60 px-4 py-3 text-[11px] text-ink-600">
         Not investment advice. Research only.
       </div>
     </aside>
