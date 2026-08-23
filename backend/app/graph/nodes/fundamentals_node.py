@@ -49,8 +49,25 @@ def _facts(data: FundamentalsData) -> list[tuple[str, object]]:
     ]
 
 
+def _format_value(value: object) -> str:
+    """Round floats before they reach the prompt.
+
+    Provider ratios arrive as raw binary floats, so `revenue_growth` came through as
+    0.7068000000000001 and the model — correctly told to quote figures literally — copied
+    all seventeen digits into the finding's evidence, where it rendered as noise.
+
+    Fixed here rather than in the UI because the prompt is where the number becomes a
+    string the model is instructed to reproduce exactly; formatting it afterwards would
+    mean the displayed evidence no longer matched what was cited. The trailing-zero strip
+    is safe because `.4f` guarantees a decimal point to stop at.
+    """
+    if isinstance(value, bool) or not isinstance(value, float):
+        return str(value)
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
 def _build_prompt(data: FundamentalsData, facts: list[tuple[str, object]]) -> str:
-    facts_text = "\n".join(f"- {label}: {value}" for label, value in facts)
+    facts_text = "\n".join(f"- {label}: {_format_value(value)}" for label, value in facts)
     return (
         "You are a fundamentals research analyst. Based ONLY on the data below for "
         f"{data.ticker}, write a short summary of the company's financial health and "
