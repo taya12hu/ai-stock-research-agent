@@ -1,7 +1,11 @@
 # Classification eval cases. See eval/run_classify_eval.py.
 #
 # kind: plan      -> hand-written TurnIntent straight into plan_turn. No model, no network.
-# kind: classify  -> real model call, then the planner. Ticker resolution stubbed via `resolve`.
+# kind: classify  -> real model call, then the planner. Ticker resolution stubbed via
+#                    `resolve`, which is keyed on SYMBOLS, because that is what the real
+#                    resolver takes. Keying it on company names once made the stub more
+#                    capable than the code and hid a regression that broke every
+#                    natural-language question.
 #
 # session.researched shorthand per ticker (or per agent):
 #   fresh | stale | failed | empty | missing
@@ -315,7 +319,7 @@
     well" describes a company without asking anything about it. The request is about a
     career.
   question: "Amazon is not doing well, I might switch jobs"
-  resolve: {AMAZON: AMZN}
+  resolve: {AMZN: AMZN}
   expect_intent:
     roles: {Amazon: incidental}
     screening_scope_set: false
@@ -328,7 +332,7 @@
   kind: classify
   why: The other side of the pair above — one word different, opposite outcome.
   question: "Amazon stock is doing badly, should I be worried?"
-  resolve: {AMAZON: AMZN}
+  resolve: {AMZN: AMZN}
   expect_intent:
     roles: {Amazon: research_subject}
   expect:
@@ -340,7 +344,7 @@
   kind: classify
   why: Nothing is being asked of the company at all.
   question: "I work at Google, what should I have for lunch?"
-  resolve: {GOOGLE: GOOGL}
+  resolve: {GOOGL: GOOGL}
   expect_intent:
     roles: {Google: incidental}
   expect:
@@ -353,7 +357,7 @@
     Q13. One company, two roles in one sentence — the request half wins, and the personal
     half is kept so the answer can acknowledge it rather than drop it.
   question: "Amazon stock is falling and I'm also thinking about leaving Amazon"
-  resolve: {AMAZON: AMZN}
+  resolve: {AMZN: AMZN}
   expect_intent:
     roles: {Amazon: research_subject}
     off_domain_topic_set: true
@@ -451,7 +455,7 @@
 - id: two_named_companies_are_a_comparison_not_a_screen
   kind: classify
   question: "I'm considering HDFC Bank and ICICI Bank, which is better?"
-  resolve: {HDFC BANK: HDB, ICICI BANK: IBN}
+  resolve: {HDB: HDB, IBN: IBN}
   expect_intent:
     screening_scope_set: false
     company_count: 2

@@ -54,7 +54,9 @@ def _cells() -> dict:
 
 
 def _intent(**kwargs) -> TurnIntent:
-    companies = [CompanyRef(name=n, role=r) for n, r in kwargs.pop("companies", [])]
+    companies = [
+        CompanyRef(name=n, role=r, ticker=n.upper()) for n, r in kwargs.pop("companies", [])
+    ]
     return TurnIntent(companies=companies, **kwargs)
 
 
@@ -339,3 +341,52 @@ async def test_a_resolved_clarification_clears_pending(monkeypatch: pytest.Monke
 
     assert update["pending"] is None
     assert update["turn"]["scope"] == ["NVDA"]
+
+
+async def test_a_company_name_is_resolved_via_the_models_ticker_not_the_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for a refactor bug that broke every natural-language question.
+
+    `aresolve_ticker` *validates and corrects* symbols — it has no name lookup. Asking it
+    to resolve "NVIDIA" fails, because no symbol is spelled that way. So when the intent
+    schema stopped carrying a ticker and only reported the name as spoken, "Analyze NVIDIA"
+    started answering "'NVIDIA' could not be found and was skipped" about a company that
+    obviously exists.
+
+    It survived a whole refactor because the eval stub was keyed on company names, making
+    the double able to do something the real resolver cannot.
+    """
+    seen: list[str] = []
+
+    async def _only_symbols(ticker: str) -> ResolvedTicker:
+        seen.append(ticker)
+        return ResolvedTicker("NVDA" if ticker == "NVDA" else None)
+
+    monkeypatch.setattr(resolve_mod, "aresolve_ticker", _only_symbols)
+    intent = TurnIntent(
+        companies=[CompanyRef(name="NVIDIA", role="research_subject", ticker="NVDA")]
+    )
+
+    resolution = await resolve_scope(intent, [])
+
+    assert resolution.subjects == ["NVDA"]
+    assert seen == ["NVDA"], "the symbol must be looked up, not the spoken name"
+
+
+async def test_a_company_the_model_cannot_ticker_falls_back_to_the_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It will not resolve, but dropping it silently would be worse: the attempt is
+    recorded, so the user is told we couldn't find it rather than having it vanish.
+    """
+    monkeypatch.setattr(resolve_mod, "aresolve_ticker", _fake_resolver({}))
+    intent = TurnIntent(
+        companies=[CompanyRef(name="Some Private Startup", role="research_subject", ticker="STARTUP")]
+    )
+
+    resolution = await resolve_scope(intent, [])
+
+    assert resolution.subjects == []
+    assert resolution.attempted is True
+    assert any("could not be found" in n for n in resolution.notes)

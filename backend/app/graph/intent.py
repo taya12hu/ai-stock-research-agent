@@ -48,11 +48,24 @@ ShapeHint = Literal["single", "comparison", "portfolio", "none"]
 class CompanyRef(BaseModel):
     name: str = Field(
         description=(
-            "The company or ticker exactly as the user referred to it — 'Amazon', 'AMZN', "
-            "'Tata Consultancy'. Do not convert it to a ticker symbol and do not correct "
-            "the spelling; symbol resolution happens elsewhere."
+            "The company exactly as the user referred to it — 'Amazon', 'AMZN', 'Tata "
+            "Consultancy'. Keep their wording; this is what replies quote back to them."
         )
     )
+    ticker: str = Field(
+        description=(
+            "That company's stock ticker symbol, in caps — 'Amazon' -> 'AMZN', 'Google' -> "
+            "'GOOGL', 'Tata Consultancy' -> 'TCS'. Always fill this in: give your best "
+            "answer for any company you recognise, and if the user already typed a ticker, "
+            "repeat it here. It is checked against real market data afterwards, so a wrong "
+            "guess is caught rather than trusted — but an empty one means the company is "
+            "silently dropped."
+        )
+    )
+    # Deliberately required, with no default. Pydantic only marks a field `required` in the
+    # generated JSON schema when it has no default, and an optional field is one the model
+    # simply skips: with `default=None` it returned `ticker=None` for "Analyze NVIDIA"
+    # every time, which resolved nothing.
     role: CompanyRole = Field(
         description=(
             "How this company appears in the message.\n\n"

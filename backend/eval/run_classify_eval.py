@@ -11,7 +11,9 @@ Two kinds of case, and the split is the point:
   system's decision surface lives here, so most cases are this kind.
 - **classify** cases send a real message to the real model and check what it observed, then
   push that through the planner. One model call each; ticker resolution is stubbed from the
-  case's own `resolve` map, so no market-data calls either.
+  case's own `resolve` map, so no market-data calls either. That map is keyed on SYMBOLS,
+  matching what the real resolver accepts — keying it on company names made the stub able
+  to do something the real code cannot, and hid a regression for a full refactor.
 
 Run everything:      .venv/Scripts/python.exe -m eval.run_classify_eval
 No API key needed:   .venv/Scripts/python.exe -m eval.run_classify_eval --plan-only
@@ -101,7 +103,10 @@ def _state(case: dict[str, Any], now: datetime) -> SessionState:
 def _intent_from_spec(spec: dict[str, Any]) -> TurnIntent:
     return TurnIntent(
         companies=[
-            CompanyRef(name=c["name"], role=c["role"]) for c in (spec.get("companies") or [])
+            CompanyRef(
+                name=c["name"], role=c["role"], ticker=c.get("ticker", c["name"]).upper()
+            )
+            for c in (spec.get("companies") or [])
         ],
         refers_to_prior=spec.get("refers_to_prior", False),
         screening_scope=spec.get("screening_scope"),

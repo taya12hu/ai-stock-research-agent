@@ -4,11 +4,16 @@ Deliberately the only impure step between `classify_turn` and `plan_turn`: it ma
 network calls, so keeping it separate is what lets every scope and shape decision be
 tested against a hand-built `ScopeResolution` with no provider involved.
 
-The model never emits ticker symbols — it reports the name as the user said it ("Amazon",
-"Tata Consultancy"), and resolution happens here against `aresolve_ticker`, which is
-unchanged and already correct: it demands real price history before accepting a symbol,
-which is what caught bare `TCS` resolving to a delisted company when Tata Consultancy
-Services is actually `TCS.NS`.
+The model supplies both what the user said ("Amazon") and its best guess at the symbol
+("AMZN"). This step checks the guess against real market data — `aresolve_ticker` demands
+actual price history before accepting a symbol, which is what caught bare `TCS` matching a
+delisted company when Tata Consultancy Services is really `TCS.NS`.
+
+Splitting those two jobs matters, and getting it wrong broke natural-language questions
+entirely for a while: `aresolve_ticker` *validates and corrects* symbols, it does not look
+companies up by name. Asking it to resolve "NVIDIA" fails, because no symbol is spelled
+that way. So the model has to supply the symbol and this step has to verify it — neither
+half works alone.
 """
 
 from __future__ import annotations
@@ -40,8 +45,11 @@ async def resolve_scope(intent: TurnIntent, known_tickers: list[str]) -> ScopeRe
     same symbol rather than re-resolving the bare form and possibly landing somewhere else.
     """
     companies = intent.companies or []
-    subject_names = [c.name for c in companies if c.role == "research_subject"]
-    unclear_names = [c.name for c in companies if c.role == "unclear"]
+    # The symbol when the model supplied one, the raw name only as a fallback — a name
+    # will not resolve, but it is better than dropping the company silently, and it makes
+    # the failure legible in the logs.
+    subject_names = [c.ticker or c.name for c in companies if c.role == "research_subject"]
+    unclear_names = [c.ticker or c.name for c in companies if c.role == "unclear"]
     attempted = bool(subject_names or unclear_names)
 
     notes: list[str] = []

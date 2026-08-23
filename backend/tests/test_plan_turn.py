@@ -57,7 +57,9 @@ def _intent(
     off_domain_topic: str | None = None,
 ) -> TurnIntent:
     return TurnIntent(
-        companies=[CompanyRef(name=n, role=r) for n, r in (companies or [])],
+        companies=[
+            CompanyRef(name=n, role=r, ticker=n.upper()) for n, r in (companies or [])
+        ],
         refers_to_prior=refers_to_prior,
         screening_scope=screening_scope,
         shape_hint=shape_hint,

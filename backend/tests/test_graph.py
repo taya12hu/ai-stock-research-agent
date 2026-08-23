@@ -137,7 +137,11 @@ def _mock_intent(monkeypatch: pytest.MonkeyPatch, intent: TurnIntent, mapping: d
 
 
 def _subjects(*names: str) -> TurnIntent:
-    return TurnIntent(companies=[CompanyRef(name=n, role="research_subject") for n in names])
+    return TurnIntent(
+        companies=[
+            CompanyRef(name=n, role="research_subject", ticker=n) for n in names
+        ]
+    )
 
 
 def _state(question: str = "Analyze AAPL") -> Any:
@@ -272,7 +276,8 @@ async def test_fan_out_dispatches_only_the_cells_in_the_fetch_list(
     monkeypatch.setattr(technical_mod, "aget_technical_data", _tracked_technical)
 
     intent = TurnIntent(
-        companies=[CompanyRef(name="AAPL", role="research_subject")], aspects=["fundamentals"]
+        companies=[CompanyRef(name="AAPL", role="research_subject", ticker="AAPL")],
+        aspects=["fundamentals"],
     )
     result = await _run(monkeypatch, intent, {"AAPL": "AAPL"})
 
