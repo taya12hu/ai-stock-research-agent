@@ -341,6 +341,23 @@ async def test_chat_lane_runs_no_agents(monkeypatch: pytest.MonkeyPatch) -> None
     assert "a pasta recipe" in result["turn"]["output"]["text"]
 
 
+async def test_a_wholly_off_domain_message_names_its_topic_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mixed_acknowledgment` is for the off-domain HALF of a mixed message, appended after
+    a report. It used to be appended to every turn, so a message that was *entirely*
+    off-domain got the topic twice — once from `replies.off_domain`, once from the
+    acknowledgment — and closed with "the research above may be useful input" when no
+    research had run. Observed on "hi, can you write my resignation email?".
+    """
+    text = (await _run(monkeypatch, TurnIntent(off_domain_topic="a pasta recipe"), {}))["turn"][
+        "output"
+    ]["text"]
+
+    assert text.count("a pasta recipe") == 1
+    assert "research above" not in text
+
+
 # ─────────────────────── citations ───────────────────────
 
 

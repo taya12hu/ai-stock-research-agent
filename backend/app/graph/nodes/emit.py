@@ -112,9 +112,16 @@ async def emit_node(state: SessionState) -> dict:
     if turn["kind"] in ("research", "recall") and turn["notes"]:
         parts.append("\n\n" + " ".join(turn["notes"]))
 
-    # The off-domain half of a mixed message, last. Leading with a decline would bury the
+    # The off-domain half of a MIXED message, last. Leading with a decline would bury the
     # report the user actually asked for behind a caveat about the part they didn't.
-    parts.append(replies.mixed_acknowledgment(turn["off_domain_topic"]))
+    #
+    # Gated on the turn having produced research, for the same reason as the notes above.
+    # A chat turn is the case where the off-domain half was the *whole* message, and its
+    # reply already names the topic via `replies.off_domain` — appending this too said the
+    # topic twice and, worse, closed with "the research above may be useful input" when
+    # there was no research above. Observed on "hi, can you write my resignation email?".
+    if turn["kind"] in ("research", "recall"):
+        parts.append(replies.mixed_acknowledgment(turn["off_domain_topic"]))
 
     text = "".join(p for p in parts if p).strip()
     final = TurnOutput(kind=output["kind"], text=text)
