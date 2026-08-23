@@ -42,5 +42,3 @@ Thumbs.db
 # Claude Code session config (tool-specific, not project config)
 .claude/
 
-# Design sources (only the exported asset in frontend/public ships)
-frontend/design-assets/

@@ -7,7 +7,7 @@ partial data/agent failure, follow-up Q&A, and a small evaluation harness to mea
 whether changes actually help.
 
 This is a learning-scoped project. It is **not** an autonomous trading system or a
-production financial platform — see [ARCHITECTURE.md §1](./ARCHITECTURE.md#1-what-this-is)
+production financial platform — see [ARCHITECTURE.md §1](./ARCHITECTURE.md#1-scope)
 for what it deliberately doesn't do, and
 [§13](./ARCHITECTURE.md#13-known-limits) for its known limits.
 
@@ -28,7 +28,7 @@ follow-up questions in the same session, including ones that need fresh data (e.
 news on AMD today?" or "add Intel to the comparison").
 
 Follow-ups reuse what's already been fetched when it's still current, and re-fetch only
-the parts that have gone stale — see [ARCHITECTURE.md §4](./ARCHITECTURE.md#4-deciding-scope-shape-and-what-to-fetch).
+the parts that have gone stale — see [ARCHITECTURE.md §5](./ARCHITECTURE.md#5-turn-planning).
 
 ## Project layout
 
@@ -87,5 +87,5 @@ frontend, and the eval harness.
 
 The graph was rebuilt around per-turn planning — every message gets its scope, its shape,
 and its data-freshness decisions worked out fresh, in plain code rather than by the model.
-[ARCHITECTURE.md §2](./ARCHITECTURE.md#2-the-one-idea-that-shapes-everything) explains why,
+[ARCHITECTURE.md §2](./ARCHITECTURE.md#2-design-principles) explains why,
 and [§13](./ARCHITECTURE.md#13-known-limits) lists what's still limited.

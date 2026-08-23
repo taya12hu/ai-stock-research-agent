@@ -4,9 +4,8 @@
 // browser can cache independently of the JS bundle, instead of being fingerprinted into
 // it and re-downloaded on every deploy.
 //
-// WebP, not the original PNG: the artwork is mostly flat gradient, which WebP encodes at
-// 33KB against the PNG's 1.8MB for no visible difference at this scale. The source PNG is
-// kept out of the build at `frontend/design-assets/bg-source.png`.
+// WebP, not PNG: the artwork is mostly flat gradient, which WebP encodes at 36KB against
+// the PNG's 1.9MB for no visible difference at this scale.
 //
 // `background-size: cover` with a right-anchored position is deliberate: the artwork
 // keeps its subject matter (bull, candles, newspaper, bear) massed on the right and its
