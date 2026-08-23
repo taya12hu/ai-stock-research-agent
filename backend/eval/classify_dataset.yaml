@@ -588,3 +588,31 @@
     kind: recall
     scope: [NVDA]
     shape: single
+
+- id: mid_session_request_for_more_companies_is_screening
+  kind: classify
+  why: >
+    Discovery surfacing mid-session rather than on the first message. Caught in a live eval
+    run that routed it to `recall`, which answered about the one company already in the
+    session — declining safely, but only because `answer_from_context`'s prompt says not to
+    invent, and phrased as a data limitation ("the research you provided only contains...")
+    rather than a capability boundary.
+
+    Classified correctly when checked by hand, so this is sampling variance on the field
+    rather than a flat failure — which is exactly what belongs in this suite, since a
+    single passing run proves nothing about a boundary the model is split on.
+  question: "What other good tech stocks should I look at?"
+  session:
+    researched: {AAPL: fresh}
+    last_scope: [AAPL]
+    last_shape: single
+    conversation:
+      - {role: user, content: "Analyze AAPL"}
+      - {role: assistant, content: "...", gist: "(single report on AAPL)"}
+  expect_intent:
+    screening_scope_set: true
+    company_count: 0
+  expect:
+    kind: chat
+    scope: []
+    fetch: []

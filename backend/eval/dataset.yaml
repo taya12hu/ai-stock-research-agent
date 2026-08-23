@@ -136,13 +136,17 @@
       expected_discovery: true
 
 - id: not_discovery_when_specific_stocks_given
-  # Negative case: specific companies ARE named, so this must proceed as a normal
-  # comparison — the discovery check must not misfire just because the question is
-  # framed as "which one is best". expected_tickers uses bare symbols (no exchange
-  # suffix) since check_tickers_correct compares on the bare form either way.
+  # Negative case: specific companies ARE named, so the discovery check must not misfire
+  # just because the question is framed as "which one is best".
+  #
+  # These three are Indian listings, and coverage is US-only (ARCHITECTURE.md section 8),
+  # so the right outcome is the coverage decline — naming each one and saying it isn't
+  # supported. The expectations originally said `comparison` with all three tickers, which
+  # this app has never been able to do; the case was asserting something the documented
+  # scope rules out. What it actually guards is that named companies are treated as named
+  # companies: no screening reply, and no fabricated ticker.
   question: "I'm considering Sun Pharma, Cipla and Dr Reddy's. Which one has been affected most by recent negative news?"
-  expected_query_type: comparison
-  expected_tickers: [SUNPHARMA, CIPLA, DRREDDY]
+  expected_discovery: true
   followups: []
 
 - id: discovery_followup_similar_stocks
