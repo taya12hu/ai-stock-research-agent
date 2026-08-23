@@ -120,6 +120,7 @@ async def test_plan_event_carries_this_turns_scope_shape_and_notes() -> None:
         session_id, "plan",
         {"turn": {
             "kind": "research", "shape": "single", "scope": ["AAPL"],
+            "aspects": ["news"],
             "notes": ["'ZZZ' could not be found and was skipped."],
             "fetch": [{"ticker": "AAPL", "agent": "news"}],
         }},
@@ -127,6 +128,9 @@ async def test_plan_event_carries_this_turns_scope_shape_and_notes() -> None:
 
     events = [e for _, e in await session_bus.get_events_after(session_id, 0)]
 
+    # `aspects` is on the plan but deliberately not on the wire: which agents are running
+    # is carried by the `agent_started` events derived from `fetch`, which is the set that
+    # is actually dispatched.
     assert events[0] == {
         "type": "router_completed", "query_type": "single", "tickers": ["AAPL"],
         "notes": ["'ZZZ' could not be found and was skipped."],
@@ -163,7 +167,8 @@ async def test_notes_folded_into_a_chat_reply_are_not_also_broadcast() -> None:
     await _publish_for_node(
         session_id, "plan",
         {"turn": {
-            "kind": "chat", "shape": "single", "scope": [], "notes": [], "fetch": [],
+            "kind": "chat", "shape": "single", "scope": [], "aspects": [], "notes": [],
+            "fetch": [],
         }},
     )
 
