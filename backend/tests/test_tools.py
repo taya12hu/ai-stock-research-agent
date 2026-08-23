@@ -4,9 +4,10 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
+import requests
 
-from app.tools import web_search, yahoo_finance
-from app.tools.errors import WebSearchError, YahooFinanceError
+from app.tools import market_data, web_search
+from app.tools.errors import WebSearchError, MarketDataError
 from app.tools.web_search import DDGSException
 
 
@@ -15,12 +16,12 @@ def _clear_caches() -> None:
     """Tool-layer caches are module-level TTLCache instances shared across the whole
     test session (they're built at import time), so tests using the same ticker/query
     strings would otherwise see stale results from a previous test."""
-    yahoo_finance._info_cache.clear()
-    yahoo_finance._history_cache.clear()
+    market_data._info_cache.clear()
+    market_data._history_cache.clear()
     web_search._search_cache.clear()
 
 
-# --- yahoo_finance: fundamentals (Finnhub) ---------------------------------------------
+# --- market_data: fundamentals (Finnhub) ---------------------------------------------
 
 
 FINNHUB_VALID_PROFILE = {
@@ -63,9 +64,9 @@ def _fake_finnhub_get(valid: bool):
 
 
 def test_get_fundamentals_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=True))
+    monkeypatch.setattr(market_data, "_finnhub_get", _fake_finnhub_get(valid=True))
 
-    result = yahoo_finance.get_fundamentals("aapl")
+    result = market_data.get_fundamentals("aapl")
 
     assert result.ticker == "AAPL"
     assert result.name == "Apple Inc."
@@ -78,10 +79,10 @@ def test_get_fundamentals_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_get_fundamentals_invalid_ticker_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=False))
+    monkeypatch.setattr(market_data, "_finnhub_get", _fake_finnhub_get(valid=False))
 
-    with pytest.raises(YahooFinanceError, match="no fundamentals data"):
-        yahoo_finance.get_fundamentals("ZZZINVALID")
+    with pytest.raises(MarketDataError, match="no fundamentals data"):
+        market_data.get_fundamentals("ZZZINVALID")
 
 
 def test_get_fundamentals_fetch_failure_message_is_clean(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,46 +92,25 @@ def test_get_fundamentals_fetch_failure_message_is_clean(monkeypatch: pytest.Mon
     def _raise(path: str, params: dict) -> dict:  # noqa: ARG001
         raise ValueError("obscure internal parsing failure with a stack-trace-like body")
 
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _raise)
+    monkeypatch.setattr(market_data, "_finnhub_get", _raise)
 
-    with pytest.raises(YahooFinanceError) as exc_info:
-        yahoo_finance.get_fundamentals("AAPL")
+    with pytest.raises(MarketDataError) as exc_info:
+        market_data.get_fundamentals("AAPL")
 
     assert "Unable to fetch fundamentals data" in str(exc_info.value)
     assert "stack-trace-like" not in str(exc_info.value)
 
 
-def test_ticker_exists_true_for_valid(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=True))
-
-    assert yahoo_finance.ticker_exists("AAPL") is True
-
-
-def test_ticker_exists_false_for_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=False))
-
-    assert yahoo_finance.ticker_exists("ZZZINVALID") is False
-
-
-def test_ticker_exists_false_on_persistent_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _raise(path: str, params: dict) -> dict:  # noqa: ARG001
-        raise ValueError("boom")
-
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _raise)
-
-    assert yahoo_finance.ticker_exists("AAPL") is False
-
-
 def test_get_company_name_returns_short_name_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=True))
+    monkeypatch.setattr(market_data, "_finnhub_get", _fake_finnhub_get(valid=True))
 
-    assert yahoo_finance.get_company_name("AAPL") == "Apple Inc."
+    assert market_data.get_company_name("AAPL") == "Apple Inc."
 
 
 def test_get_company_name_none_for_invalid_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=False))
+    monkeypatch.setattr(market_data, "_finnhub_get", _fake_finnhub_get(valid=False))
 
-    assert yahoo_finance.get_company_name("ZZZINVALID") is None
+    assert market_data.get_company_name("ZZZINVALID") is None
 
 
 def test_get_company_name_none_on_fetch_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,15 +120,15 @@ def test_get_company_name_none_on_fetch_failure(monkeypatch: pytest.MonkeyPatch)
     def _raise(path: str, params: dict) -> dict:  # noqa: ARG001
         raise ValueError("boom")
 
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _raise)
+    monkeypatch.setattr(market_data, "_finnhub_get", _raise)
 
-    assert yahoo_finance.get_company_name("AAPL") is None
+    assert market_data.get_company_name("AAPL") is None
 
 
 async def test_aget_company_name_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=True))
+    monkeypatch.setattr(market_data, "_finnhub_get", _fake_finnhub_get(valid=True))
 
-    assert await yahoo_finance.aget_company_name("AAPL") == "Apple Inc."
+    assert await market_data.aget_company_name("AAPL") == "Apple Inc."
 
 
 def test_fetch_info_retries_on_transient_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -161,15 +141,15 @@ def test_fetch_info_retries_on_transient_network_error(monkeypatch: pytest.Monke
             raise ConnectionError("transient")
         return succeed(path, params)
 
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _flaky)
+    monkeypatch.setattr(market_data, "_finnhub_get", _flaky)
 
-    result = yahoo_finance.get_fundamentals("AAPL")
+    result = market_data.get_fundamentals("AAPL")
 
     assert calls["count"] >= 3
     assert result.name == "Apple Inc."
 
 
-# --- yahoo_finance: technicals (Twelve Data) -------------------------------------------
+# --- market_data: technicals (Twelve Data) -------------------------------------------
 
 
 def _synthetic_history(days: int = 300, start_price: float = 100.0) -> pd.DataFrame:
@@ -223,10 +203,10 @@ class FakeResponse:
 def test_get_technical_data_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     history = _synthetic_history()
     monkeypatch.setattr(
-        yahoo_finance.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
+        market_data.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
     )
 
-    result = yahoo_finance.get_technical_data("AAPL")
+    result = market_data.get_technical_data("AAPL")
 
     assert result.ticker == "AAPL"
     assert result.sma_20 is not None
@@ -249,10 +229,10 @@ def test_get_technical_data_short_history_returns_partial_indicators(
     """Fewer than 200 data points: long-window indicators should be None, not crash."""
     history = _synthetic_history(days=10)
     monkeypatch.setattr(
-        yahoo_finance.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
+        market_data.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
     )
 
-    result = yahoo_finance.get_technical_data("AAPL")
+    result = market_data.get_technical_data("AAPL")
 
     assert result.sma_200 is None
     assert result.sma_50 is None
@@ -262,13 +242,13 @@ def test_get_technical_data_short_history_returns_partial_indicators(
 
 def test_get_technical_data_empty_history_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        yahoo_finance.requests,
+        market_data.requests,
         "get",
         lambda *a, **kw: FakeResponse({"status": "error", "message": "no data"}),  # noqa: ARG005
     )
 
-    with pytest.raises(YahooFinanceError, match="no price history"):
-        yahoo_finance.get_technical_data("ZZZINVALID")
+    with pytest.raises(MarketDataError, match="no price history"):
+        market_data.get_technical_data("ZZZINVALID")
 
 
 def test_fetch_history_404_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -281,9 +261,9 @@ def test_fetch_history_404_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> No
         calls["count"] += 1
         return FakeResponse({}, status_code=404)
 
-    monkeypatch.setattr(yahoo_finance.requests, "get", _fake_get)
+    monkeypatch.setattr(market_data.requests, "get", _fake_get)
 
-    assert yahoo_finance.resolve_ticker("ZZZINVALID").symbol is None
+    assert market_data.resolve_ticker("ZZZINVALID").symbol is None
     # 1 request per candidate (bare + 2 suffixes), no retries on any of them.
     assert calls["count"] == 3
 
@@ -292,16 +272,16 @@ def test_get_technical_data_fetch_failure_message_is_clean(monkeypatch: pytest.M
     def _raise(*args: object, **kwargs: object) -> FakeResponse:
         raise ValueError("obscure internal parsing failure with a stack-trace-like body")
 
-    monkeypatch.setattr(yahoo_finance.requests, "get", _raise)
+    monkeypatch.setattr(market_data.requests, "get", _raise)
 
-    with pytest.raises(YahooFinanceError) as exc_info:
-        yahoo_finance.get_technical_data("AAPL")
+    with pytest.raises(MarketDataError) as exc_info:
+        market_data.get_technical_data("AAPL")
 
     assert "Unable to fetch price history" in str(exc_info.value)
     assert "stack-trace-like" not in str(exc_info.value)
 
 
-# --- yahoo_finance: indicator math is actually correct, not just in-bounds -------------
+# --- market_data: indicator math is actually correct, not just in-bounds -------------
 #
 # test_get_technical_data_happy_path above only checks *plausibility* (RSI in [0,100],
 # volatility >= 0, ...) — it would pass even if the SMA/RSI/MACD formulas were subtly
@@ -357,29 +337,29 @@ def _reference_macd(values: list[float]) -> dict[str, float]:
 
 def test_sma_matches_independent_reference_implementation() -> None:
     close = pd.Series(_FIXED_CLOSES)
-    assert yahoo_finance._sma(close, 20) == _reference_sma(_FIXED_CLOSES, 20)
+    assert market_data._sma(close, 20) == _reference_sma(_FIXED_CLOSES, 20)
 
 
 def test_rsi_matches_independent_reference_implementation() -> None:
     close = pd.Series(_FIXED_CLOSES)
-    assert yahoo_finance._rsi(close, 14) == _reference_rsi(_FIXED_CLOSES, 14)
+    assert market_data._rsi(close, 14) == _reference_rsi(_FIXED_CLOSES, 14)
 
 
 def test_macd_matches_independent_reference_implementation() -> None:
     close = pd.Series(_FIXED_CLOSES)
-    assert yahoo_finance._macd(close) == _reference_macd(_FIXED_CLOSES)
+    assert market_data._macd(close) == _reference_macd(_FIXED_CLOSES)
 
 
-# --- yahoo_finance: ticker resolution / exchange-suffix fallback (Twelve Data) --------
+# --- market_data: ticker resolution / exchange-suffix fallback (Twelve Data) --------
 
 
 def test_resolve_ticker_returns_bare_symbol_when_fully_usable(monkeypatch: pytest.MonkeyPatch) -> None:
     history = _synthetic_history()
     monkeypatch.setattr(
-        yahoo_finance.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
+        market_data.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
     )
 
-    result = yahoo_finance.resolve_ticker("aapl")
+    result = market_data.resolve_ticker("aapl")
 
     assert result.symbol == "AAPL"
     assert result.unsupported_market is False
@@ -401,19 +381,19 @@ def test_resolve_ticker_falls_back_to_ns_suffix_when_bare_symbol_is_delisted(
     def _fake_get(url: str, params: dict, **kwargs: object) -> FakeResponse:  # noqa: ARG001
         return FakeResponse(bodies[params["symbol"]])
 
-    monkeypatch.setattr(yahoo_finance.requests, "get", _fake_get)
+    monkeypatch.setattr(market_data.requests, "get", _fake_get)
 
-    assert yahoo_finance.resolve_ticker("TCS").symbol == "TCS.NS"
+    assert market_data.resolve_ticker("TCS").symbol == "TCS.NS"
 
 
 def test_resolve_ticker_returns_none_when_no_variant_is_usable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        yahoo_finance.requests,
+        market_data.requests,
         "get",
         lambda *a, **kw: FakeResponse({"status": "error", "message": "not found"}),  # noqa: ARG005
     )
 
-    result = yahoo_finance.resolve_ticker("ZZZINVALID")
+    result = market_data.resolve_ticker("ZZZINVALID")
 
     assert result.symbol is None
     assert result.unsupported_market is False
@@ -435,9 +415,9 @@ def test_resolve_ticker_flags_unsupported_market_for_plan_gated_symbol(
             text="This symbol is available starting with the Grow or Venture plan.",
         )
 
-    monkeypatch.setattr(yahoo_finance.requests, "get", _fake_get)
+    monkeypatch.setattr(market_data.requests, "get", _fake_get)
 
-    result = yahoo_finance.resolve_ticker("TCS")
+    result = market_data.resolve_ticker("TCS")
 
     assert result.symbol is None
     assert result.unsupported_market is True
@@ -453,9 +433,9 @@ def test_resolve_ticker_plan_gated_symbol_is_not_retried(monkeypatch: pytest.Mon
         calls["count"] += 1
         return FakeResponse({}, status_code=404, text="available starting with the Grow plan")
 
-    monkeypatch.setattr(yahoo_finance.requests, "get", _fake_get)
+    monkeypatch.setattr(market_data.requests, "get", _fake_get)
 
-    yahoo_finance.resolve_ticker("TCS")
+    market_data.resolve_ticker("TCS")
 
     assert calls["count"] == 3  # 1 per candidate (bare + 2 suffixes), no retries
 
@@ -463,10 +443,10 @@ def test_resolve_ticker_plan_gated_symbol_is_not_retried(monkeypatch: pytest.Mon
 async def test_aresolve_ticker_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     history = _synthetic_history()
     monkeypatch.setattr(
-        yahoo_finance.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
+        market_data.requests, "get", lambda *a, **kw: FakeResponse(_twelvedata_body(history))  # noqa: ARG005
     )
 
-    result = await yahoo_finance.aresolve_ticker("AAPL")
+    result = await market_data.aresolve_ticker("AAPL")
 
     assert result.symbol == "AAPL"
 
@@ -475,18 +455,18 @@ async def test_aresolve_ticker_happy_path(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 async def test_aget_fundamentals_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=True))
+    monkeypatch.setattr(market_data, "_finnhub_get", _fake_finnhub_get(valid=True))
 
-    result = await yahoo_finance.aget_fundamentals("AAPL")
+    result = await market_data.aget_fundamentals("AAPL")
 
     assert result.ticker == "AAPL"
 
 
 async def test_aget_fundamentals_propagates_tool_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(yahoo_finance, "_finnhub_get", _fake_finnhub_get(valid=False))
+    monkeypatch.setattr(market_data, "_finnhub_get", _fake_finnhub_get(valid=False))
 
-    with pytest.raises(YahooFinanceError):
-        await yahoo_finance.aget_fundamentals("ZZZINVALID")
+    with pytest.raises(MarketDataError):
+        await market_data.aget_fundamentals("ZZZINVALID")
 
 
 # --- web_search --------------------------------------------------------------------
@@ -595,3 +575,63 @@ async def test_asearch_news_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     results = await web_search.asearch_news("NVIDIA stock news")
 
     assert len(results) == 1
+
+
+def _http_error(status: int) -> requests.HTTPError:
+    response = requests.Response()
+    response.status_code = status
+    return requests.HTTPError(f"{status} error", response=response)
+
+
+def test_throttled_lookup_is_not_reported_as_a_missing_company(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Found by an eval run against live providers.
+
+    Twelve Data's free tier allows roughly 8 requests a minute, so a burst of parallel
+    agents exhausts all four retries. `_is_fully_usable` then swallowed the 429 into
+    "not usable", so the ticker was dropped and the user was told a real company could
+    not be found — the same misreport `unsupported_market` exists to prevent.
+    """
+    def _raise(ticker: str, period: str) -> object:  # noqa: ARG001
+        raise _http_error(429)
+
+    monkeypatch.setattr(market_data, "_fetch_history", _raise)
+
+    resolved = market_data.resolve_ticker("GOOGL")
+
+    assert resolved.symbol is None
+    assert resolved.provider_unavailable is True
+    assert resolved.unsupported_market is False
+
+
+def test_a_genuinely_absent_symbol_is_still_reported_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other side: an empty result means we asked and the answer was no, which must
+    not be softened into "we couldn't check".
+    """
+    monkeypatch.setattr(market_data, "_fetch_history", lambda t, p: pd.DataFrame())  # noqa: ARG005
+
+    resolved = market_data.resolve_ticker("ZZZINVALID")
+
+    assert resolved.symbol is None
+    assert resolved.provider_unavailable is False
+
+
+def test_unsupported_market_wins_over_throttling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`resolve_ticker` tries the bare symbol then exchange suffixes, so one lookup can
+    be throttled while another returns a real coverage answer. The coverage answer is the
+    actual reason and should be what the user hears.
+    """
+    def _mixed(ticker: str, period: str):  # noqa: ARG001
+        if ticker.endswith(".NS"):
+            raise market_data._UnsupportedMarketError(ticker)
+        raise _http_error(429)
+
+    monkeypatch.setattr(market_data, "_fetch_history", _mixed)
+
+    resolved = market_data.resolve_ticker("TCS")
+
+    assert resolved.unsupported_market is True
+    assert resolved.provider_unavailable is False

@@ -1,5 +1,5 @@
 """Manual/dev verification script for the full research graph (router + dynamic
-multi-ticker fan-out + type-aware synthesis) — runs against real Yahoo Finance,
+multi-ticker fan-out + rendering) — runs against real market-data providers,
 DuckDuckGo, and Groq calls (not mocked; see tests/test_graph.py for the mocked/
 automated version).
 
@@ -17,19 +17,19 @@ import sys
 import uuid
 
 from app.graph.build_graph import build_research_graph
-from app.graph.state import new_state
+from app.graph.session import new_session_state
 
 
 async def main(question: str) -> None:
     graph = build_research_graph()
-    state = new_state(user_question=question, session_id=str(uuid.uuid4()))
+    state = new_session_state(user_question=question, session_id=str(uuid.uuid4()))
     result = await graph.ainvoke(state)
 
     print("=" * 80)
     print(f"query_type: {result['query_type']}  tickers: {result['tickers']}")
     if result.get("notes"):
         print(f"notes: {result['notes']}")
-    for ticker, ticker_results in result["per_ticker_results"].items():
+    for ticker, ticker_results in result["researched"].items():
         print(f"-- {ticker} --")
         for agent, agent_result in ticker_results.items():
             if agent_result["status"] == "failed":

@@ -6,7 +6,7 @@ export type QueryType = "single" | "portfolio" | "comparison";
 export type AgentStatus = "queued" | "running" | "ok" | "failed";
 
 export interface Source {
-  type: "yahoo_finance" | "web";
+  type: "market_data" | "web";
   label: string;
   url: string | null;
   as_of: string;
@@ -35,7 +35,6 @@ interface BaseEvent<T extends string> {
 export type ResearchEvent =
   | BaseEvent<"run_started">
   | (BaseEvent<"router_completed"> & { query_type: QueryType; tickers: string[]; notes: string[] })
-  | (BaseEvent<"followup_classified"> & { path: string; tickers: string[]; notes: string[] })
   | (BaseEvent<"agent_started"> & { ticker: string; agent: AgentName })
   | (BaseEvent<"agent_completed"> & {
       ticker: string;
@@ -53,7 +52,6 @@ export type ResearchEvent =
 export const EVENT_TYPES: ResearchEvent["type"][] = [
   "run_started",
   "router_completed",
-  "followup_classified",
   "agent_started",
   "agent_completed",
   "report_ready",

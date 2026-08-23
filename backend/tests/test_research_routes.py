@@ -25,17 +25,17 @@ def _clean_running_tasks():
 
 
 class _FakeState:
-    def __init__(self, conversation_history: list[dict]) -> None:
-        self.values = {"conversation_history": conversation_history}
+    def __init__(self, conversation: list[dict]) -> None:
+        self.values = {"conversation": conversation}
 
 
 class _FakeGraph:
     """Enough of the compiled graph's surface for `ask_followup`'s own logic — the
     404/409 guards and background-task bookkeeping — without exercising real LangGraph
-    execution, which is already covered elsewhere (test_graph.py/test_followup.py)."""
+    execution, which is already covered in test_graph.py."""
 
-    def __init__(self, conversation_history: list[dict]) -> None:
-        self._state = _FakeState(conversation_history)
+    def __init__(self, conversation: list[dict]) -> None:
+        self._state = _FakeState(conversation)
 
     async def aget_state(self, config: dict) -> _FakeState:  # noqa: ARG002
         return self._state
@@ -45,8 +45,8 @@ class _FakeGraph:
         yield  # pragma: no cover - makes this an async generator that yields nothing
 
 
-def _fake_request(conversation_history: list[dict]) -> SimpleNamespace:
-    graph = _FakeGraph(conversation_history)
+def _fake_request(conversation: list[dict]) -> SimpleNamespace:
+    graph = _FakeGraph(conversation)
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(graph=graph)))
 
 
@@ -83,6 +83,33 @@ async def test_ask_followup_rejects_a_second_call_while_a_run_is_still_in_progre
     in_flight.cancel()
     with pytest.raises(asyncio.CancelledError):
         await in_flight
+
+
+async def test_two_concurrent_followups_result_in_exactly_one_run() -> None:
+    """The guard used to be correct only by statement ordering — there was no `await`
+    between reading `_running_tasks` and writing it back, so asyncio's single-threaded
+    scheduling happened to make the pair atomic. `ask_followup` does await
+    `graph.aget_state` beforehand, so two callers can genuinely interleave up to that
+    point; an explicit lock is what makes the claim itself indivisible rather than relying
+    on nobody ever adding a line in the window.
+    """
+    session_id = str(uuid.uuid4())
+    request = _fake_request([{"role": "user", "content": "hi"}])
+
+    results = await asyncio.gather(
+        ask_followup(session_id, FollowUpRequest(question="one"), request),
+        ask_followup(session_id, FollowUpRequest(question="two"), request),
+        return_exceptions=True,
+    )
+
+    accepted = [r for r in results if not isinstance(r, Exception)]
+    rejected = [r for r in results if isinstance(r, HTTPException)]
+
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    assert rejected[0].status_code == 409
+
+    await _running_tasks[session_id]
 
 
 async def test_ask_followup_allows_a_new_call_once_the_previous_run_finished() -> None:

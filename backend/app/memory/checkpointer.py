@@ -2,7 +2,7 @@
 (`thread_id` = `session_id`) so follow-ups resume from where the last turn left off.
 
 Reuses the same SQLite file as the SSE event log (`app/streaming/session_bus.py`) —
-ARCHITECTURE.md §9 calls for "the same SQLite store", and `AsyncSqliteSaver` just adds
+ARCHITECTURE.md §10 calls for "the same SQLite store", and `AsyncSqliteSaver` just adds
 its own tables to that file alongside the `events` table.
 """
 

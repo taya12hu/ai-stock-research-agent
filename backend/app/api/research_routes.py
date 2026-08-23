@@ -1,7 +1,7 @@
 """POST /research starts a run in the background; GET /research/{id}/stream serves its
 progress as SSE, replaying persisted events on reconnect via `Last-Event-ID` (see
-ARCHITECTURE.md §9 and `app/streaming/session_bus.py`). POST /research/{id}/ask handles
-a follow-up turn in the same session (ARCHITECTURE.md §8) — the session's conversation
+ARCHITECTURE.md §10 and `app/streaming/session_bus.py`). POST /research/{id}/ask handles
+a follow-up turn in the same session (ARCHITECTURE.md §5) — the session's conversation
 persists across both endpoints via the LangGraph checkpointer, keyed by
 `thread_id` = `session_id` (see `app/memory/checkpointer.py`).
 
@@ -23,8 +23,7 @@ from fastapi.responses import StreamingResponse
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel
 
-from app.graph.build_graph import SPECIALIST_NODES, router_outcome
-from app.graph.state import new_state
+from app.graph.session import new_session_state
 from app.logging_config import get_logger, log_event
 from app.streaming import events as ev
 from app.streaming import session_bus
@@ -32,8 +31,33 @@ from app.streaming import session_bus
 logger = get_logger("app.api.research")
 router = APIRouter()
 
-# Keeps references to fire-and-forget run tasks so they aren't garbage-collected mid-run.
+# Keeps references to fire-and-forget run tasks so they aren't garbage-collected mid-run,
+# and doubles as the "is this session busy" registry.
 _running_tasks: dict[str, asyncio.Task] = {}
+
+# Guards the check-and-claim below. The previous version was correct, but only by accident
+# of statement ordering: there was no `await` between reading `_running_tasks` and writing
+# it back, so asyncio's single-threaded scheduling happened to make the pair atomic.
+# Any future `await` inserted into that window would have silently reintroduced a race in
+# which two concurrent runs drive the same checkpointer thread. Making the critical section
+# explicit means the correctness no longer depends on nobody adding a line.
+_registry_lock = asyncio.Lock()
+
+
+async def _claim_session(session_id: str, coro: Any) -> bool:
+    """Start `coro` as this session's run, unless one is already in flight.
+
+    `.done()` rather than plain membership: `_stream_run`'s `finally` pops the entry, but
+    only once the task has actually finished, so a membership check would report "busy" for
+    one extra tick at completion.
+    """
+    async with _registry_lock:
+        running = _running_tasks.get(session_id)
+        if running is not None and not running.done():
+            coro.close()  # never awaited — close it so Python doesn't warn about it
+            return False
+        _running_tasks[session_id] = asyncio.create_task(coro)
+        return True
 
 
 class ResearchRequest(BaseModel):
@@ -56,8 +80,9 @@ def _thread_config(session_id: str) -> dict[str, Any]:
 async def start_research(payload: ResearchRequest, request: Request) -> ResearchResponse:
     session_id = str(uuid.uuid4())
     graph = request.app.state.graph
-    task = asyncio.create_task(_run_and_publish(graph, session_id, payload.question))
-    _running_tasks[session_id] = task
+    # A fresh uuid can't collide, so this claim always succeeds — routed through the same
+    # helper anyway so there is exactly one place that registers a run.
+    await _claim_session(session_id, _run_and_publish(graph, session_id, payload.question))
     log_event(logger, "research run started", session_id=session_id)
     return ResearchResponse(session_id=session_id)
 
@@ -68,33 +93,29 @@ async def ask_followup(session_id: str, payload: FollowUpRequest, request: Reque
     existing = await graph.aget_state(_thread_config(session_id))
     # Any completed turn — research, a clarification question asked, or an off-topic
     # reply — means the session exists and the conversation can continue. Checking
-    # `conversation_history` (populated on every turn) rather than just
-    # `per_ticker_results`/`awaiting_clarification` avoids 404ing a session whose first
-    # message was off-topic, or one whose only clarification attempt dead-ended.
-    has_prior_turn = bool(existing.values.get("conversation_history"))
+    # `conversation` (written by `emit` on every path) rather than `researched` avoids
+    # 404ing a session whose first message was off-topic, or one whose only clarification
+    # attempt dead-ended.
+    has_prior_turn = bool(existing.values.get("conversation"))
     if not has_prior_turn:
         raise HTTPException(status_code=404, detail="No prior research session found for this session_id")
 
-    running = _running_tasks.get(session_id)
-    if running is not None and not running.done():
-        # The frontend already disables its input while `status === "running"`
-        # (App.tsx), which covers a single tab — this guards the same session against a
-        # second tab, a client retry, or any other caller racing a `POST .../ask` against
-        # a run that's still writing to the same LangGraph checkpointer thread. Checking
-        # `.done()` rather than just dict membership matters: `_stream_run`'s `finally`
-        # pops the entry, but only after the task has actually finished, so a plain
-        # membership check would report "busy" for one extra tick right at completion —
-        # `.done()` is accurate the instant the task's coroutine returns.
+    # The frontend already disables its input while `status === "running"` (App.tsx), which
+    # covers a single tab — this guards the same session against a second tab, a client
+    # retry, or any other caller racing a `POST .../ask` against a run that is still
+    # writing to the same LangGraph checkpointer thread.
+    claimed = await _claim_session(
+        session_id, _run_followup_and_publish(graph, session_id, payload.question)
+    )
+    if not claimed:
         raise HTTPException(status_code=409, detail="A run is already in progress for this session")
 
-    task = asyncio.create_task(_run_followup_and_publish(graph, session_id, payload.question))
-    _running_tasks[session_id] = task
     log_event(logger, "followup run started", session_id=session_id)
     return ResearchResponse(session_id=session_id)
 
 
 async def _run_and_publish(graph: CompiledStateGraph, session_id: str, user_question: str) -> None:
-    state = new_state(user_question=user_question, session_id=session_id)
+    state = new_session_state(user_question=user_question, session_id=session_id)
     await _stream_run(graph, session_id, state)
 
 
@@ -120,50 +141,41 @@ async def _stream_run(graph: CompiledStateGraph, session_id: str, run_input: dic
 
 
 async def _publish_for_node(session_id: str, node_name: str, update: dict[str, Any] | None) -> None:
+    """Derive progress events from the plan, not from which state field a node happened to
+    populate.
+
+    The previous version sniffed for `followup_answer` / `per_ticker_results` /
+    `final_report` in the update, which meant the event a turn produced depended on which
+    node ran last rather than on what the turn was (A-09). `turn.kind` and
+    `turn.output.kind` say it directly.
+    """
     if not update:
         return
 
-    if node_name in ("router", "clarification_response"):
-        tickers: list[str] = update.get("tickers", [])
-        # `router_outcome` is the exact same precedence `_fan_out_after_router` routes
-        # on (build_graph.py) — asking it here, rather than re-guessing "empty tickers
-        # means these notes are redundant", is what keeps this correct if that field
-        # ever legitimately carries notes on an ask_clarification/off_topic outcome too
-        # (neither of those downstream nodes composes its reply from notes, so a note
-        # there would need its own banner, not silent suppression by coincidence).
-        notes = [] if router_outcome(update) == "no_tickers" else update.get("notes", [])
+    if node_name == "plan":
+        turn = update.get("turn") or {}
+        # `shape` and `scope` map onto the existing wire fields: the frontend's "query
+        # type" header and per-ticker agent cards mean exactly this, so the format is
+        # unchanged even though the state behind it is entirely different.
         await session_bus.publish(
-            session_id, ev.router_completed(update.get("query_type", ""), tickers, notes)
+            session_id, ev.router_completed(turn.get("shape", ""), turn.get("scope", []), turn.get("notes", []))
         )
-        for ticker in tickers:
-            for agent in SPECIALIST_NODES:
-                await session_bus.publish(session_id, ev.agent_started(ticker, agent))
+        for cell in turn.get("fetch", []):
+            await session_bus.publish(session_id, ev.agent_started(cell["ticker"], cell["agent"]))
         return
 
-    if node_name in ("followup_router", "followup_clarification_response"):
-        path = update.get("followup_path", "answer")
-        targets = update.get("followup_targets", [])
-        target_tickers = [t["ticker"] for t in targets]
-        await session_bus.publish(session_id, ev.followup_classified(path, target_tickers, update.get("notes", [])))
-        for target in targets:
-            for agent in target["agents"]:
-                await session_bus.publish(session_id, ev.agent_started(target["ticker"], agent))
+    if node_name == "emit":
+        output = (update.get("turn") or {}).get("output") or {}
+        if output.get("kind") == "report":
+            await session_bus.publish(session_id, ev.report_ready(output["text"]))
+        else:
+            await session_bus.publish(session_id, ev.followup_answer_ready(output.get("text", "")))
         return
 
-    # `answer_from_context` and `ask_clarification` both produce a plain text assistant
-    # reply this way — keyed on the field, not the node name, since either can set it.
-    if "followup_answer" in update:
-        await session_bus.publish(session_id, ev.followup_answer_ready(update["followup_answer"]))
-        return
-
-    if "per_ticker_results" in update:
-        for ticker, agent_updates in update["per_ticker_results"].items():
-            for agent, result in agent_updates.items():
-                await session_bus.publish(session_id, ev.agent_completed(ticker, agent, result))
-        return
-
-    if "final_report" in update:
-        await session_bus.publish(session_id, ev.report_ready(update["final_report"]))
+    if "researched" in update:
+        for ticker, cells in update["researched"].items():
+            for agent, cell in cells.items():
+                await session_bus.publish(session_id, ev.agent_completed(ticker, agent, cell))
 
 
 def _format_sse(event_id: int, event: dict[str, Any]) -> str:

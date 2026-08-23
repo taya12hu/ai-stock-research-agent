@@ -33,27 +33,45 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8")
 
 from app.graph.build_graph import build_research_graph
-from app.graph.state import new_state
+from app.graph.session import new_session_state
 from eval.judge import judge_report
-from eval.objective_checks import CheckResult, run_all_checks
+from eval.objective_checks import run_all_checks
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 DATASET_PATH = Path(__file__).resolve().parent / "dataset.yaml"
 
 
 def _snapshot(result: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a graph result into the shape the checks read.
+
+    The snapshot is the harness's adapter layer, so the turn-based state is translated
+    here rather than by teaching every check about `turn`. The mapping is one-to-one:
+    `shape` is what `query_type` always meant, `scope` is the tickers this answer covers,
+    and `researched` has the same nested {ticker: {agent: ...}} shape `per_ticker_results`
+    had, with cells carrying the same `status`/`findings` keys.
+
+    The one real improvement is that report-versus-plain-reply is now read off
+    `output.kind` rather than inferred from which field happened to be populated — a turn
+    can no longer appear to have both a fresh answer and a stale report (A-09).
+    """
+    turn = result.get("turn") or {}
+    output = turn.get("output") or {}
+    is_report = output.get("kind") == "report"
     return {
-        "query_type": result.get("query_type"),
-        "tickers": result.get("tickers"),
-        "notes": result.get("notes"),
-        "final_report": result.get("final_report"),
-        "per_ticker_results": result.get("per_ticker_results"),
-        "followup_path": result.get("followup_path"),
-        # Populated for a plain-reply turn (clarification question, off-topic/discovery
-        # explanation, follow-up answer) rather than a research report — needed so
-        # check_schema and the discovery-fabrication check can see turns that never
-        # produce a final_report at all.
-        "followup_answer": result.get("followup_answer"),
+        "query_type": turn.get("shape"),
+        "tickers": turn.get("scope"),
+        # Which analyses this turn actually asked for. Needed to judge coverage: a gap
+        # only counts against a turn that was covering that aspect in the first place,
+        # and `researched` holds every cell the whole session ever fetched.
+        "aspects": turn.get("aspects"),
+        "notes": turn.get("notes"),
+        "final_report": output.get("text") if is_report else None,
+        "per_ticker_results": result.get("researched"),
+        "followup_path": turn.get("kind"),
+        # Any plain-reply turn (clarification, off-domain, recall answer) rather than a
+        # research report — needed so check_schema and the discovery-fabrication check can
+        # see turns that never produce a report at all.
+        "followup_answer": None if is_report else output.get("text"),
     }
 
 
@@ -62,7 +80,7 @@ async def run_case(graph: Any, case: dict[str, Any]) -> dict[str, Any]:
     config = {"configurable": {"thread_id": session_id}}
 
     start = time.perf_counter()
-    state = new_state(user_question=case["question"], session_id=session_id)
+    state = new_session_state(user_question=case["question"], session_id=session_id)
     result = await graph.ainvoke(state, config=config)
     turns: list[dict[str, Any]] = [
         {
@@ -91,9 +109,20 @@ async def run_case(graph: Any, case: dict[str, Any]) -> dict[str, Any]:
         )
 
     checks = run_all_checks(turns)
-    if result.get("final_report"):
+    final = turns[-1]["result_snapshot"]
+    if final.get("final_report"):
         try:
-            judge_scores = await judge_report(case["question"], result["query_type"], result["final_report"])
+            # Judge the last turn's report against the question that *produced* it, not
+            # against the case's opening question. Those used to be interchangeable,
+            # because a follow-up re-rendered the whole report for the same companies.
+            # Now that a turn can narrow, they are not: a case that opens with "Compare
+            # NVIDIA and AMD" and then asks "how is NVDA doing on its own?" correctly
+            # ends on an NVDA-only report, and grading that against the opening question
+            # scored the fix as a failure — "completely ignores AMD" — when ignoring AMD
+            # was the whole point.
+            judge_scores = await judge_report(
+                turns[-1]["question"], final["query_type"], final["final_report"]
+            )
             judge_dict: dict[str, Any] = judge_scores.model_dump()
         except Exception as exc:  # eval-harness robustness: one bad judge call shouldn't kill the run
             judge_dict = {"error": str(exc)}
@@ -146,25 +175,47 @@ async def main(limit: int | None, only: list[str] | None) -> None:
     checkpointer = InMemorySaver()
     graph = build_research_graph(checkpointer=checkpointer)
 
-    case_results = []
-    for case in cases:
-        print(f"Running case: {case['id']}...", flush=True)
-        case_result = await run_case(graph, case)
-        case_results.append(case_result)
-        failed_hard = [c["name"] for c in case_result["checks"] if c["hard"] and not c["passed"]]
-        status = "PASS" if case_result["passed_hard_checks"] else f"FAIL ({', '.join(failed_hard)})"
-        print(f"  {status} | judge: {case_result['judge']}")
-
-    summary = _summarize(case_results)
-
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / f"eval_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-    out_path.write_text(json.dumps(summary, indent=2, default=str))
+
+    case_results: list[dict[str, Any]] = []
+    for case in cases:
+        print(f"Running case: {case['id']}...", flush=True)
+        try:
+            case_result = await run_case(graph, case)
+        except Exception as exc:  # noqa: BLE001 - one bad case must not discard the rest
+            case_result = {
+                "id": case["id"], "question": case["question"], "turns": [],
+                "checks": [], "judge": {"error": str(exc)},
+                "passed_hard_checks": False, "errored": str(exc),
+            }
+        case_results.append(case_result)
+        failed_hard = [c["name"] for c in case_result["checks"] if c["hard"] and not c["passed"]]
+        status = "PASS" if case_result["passed_hard_checks"] else f"FAIL ({', '.join(failed_hard) or 'errored'})"
+        print(f"  {status} | judge: {case_result['judge']}")
+
+        # Rewritten after every case, not once at the end. A full run takes hours under
+        # provider rate limiting — 36 rate-limit hits and two retries per call in the
+        # observed case — and both attempts at a clean baseline so far have died partway
+        # (quota exhaustion once, the process killed at case 18 the next time), each losing
+        # every result it had already computed. Whatever completed should survive whatever
+        # comes next.
+        _write(out_path, _summarize(case_results), complete=False)
+
+    summary = _summarize(case_results)
+    _write(out_path, summary, complete=True)
 
     print(f"\nWrote results to {out_path}")
     print(f"Hard-check pass rate: {summary['hard_checks_pass_rate']:.0%}")
     print(f"Avg judge scores: {summary['avg_judge_scores']}")
     print(f"Avg latency: {summary['avg_latency_seconds']}s")
+
+
+def _write(path: Path, summary: dict[str, Any], *, complete: bool) -> None:
+    """`complete` marks whether every requested case ran. A partial file is useful for
+    reading what happened, but must never be mistaken for a baseline to diff against.
+    """
+    path.write_text(json.dumps({**summary, "complete": complete}, indent=2, default=str))
 
 
 if __name__ == "__main__":

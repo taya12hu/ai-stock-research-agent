@@ -1,72 +1,81 @@
-"""Helpers shared by the three type-aware synthesis nodes (single/portfolio/comparison).
+"""Rendering helpers shared by the three report shapes.
 
-All three follow the same shape: render each ticker's per-agent sections, collect its
-findings, build a citation instruction for the LLM, and append a deterministic sources
-list at the end (so every citable id is guaranteed to actually be listed — see
-ARCHITECTURE.md §11 on citation integrity).
+All three follow the same structure: render each ticker's per-agent sections, collect its
+findings, build a citation instruction from the ids that actually exist, and append a
+deterministic sources list — so every citable id is guaranteed to be listed, which is what
+the eval harness's citation-integrity check verifies mechanically.
 """
 
 from __future__ import annotations
 
-from app.graph.state import AGENT_NAMES, AgentResult, Finding, TickerResults
+from app.graph.session import AgentName, TickerCell
+from app.graph.state import AGENT_NAMES, Finding
 
-AGENT_LABELS = {
+AGENT_LABELS: dict[str, str] = {
     "fundamentals": "Fundamentals",
     "technical": "Technical",
     "news": "News & Sentiment",
 }
 AGENTS = AGENT_NAMES
 
+Cells = dict[AgentName, TickerCell]
 
-def collect_findings(ticker_results: TickerResults) -> list[Finding]:
+
+def collect_findings(cells: Cells, aspects: list[AgentName] | None = None) -> list[Finding]:
     findings: list[Finding] = []
-    for agent in AGENTS:
-        result = ticker_results.get(agent)
-        if result and result["status"] == "ok":
-            findings.extend(result["findings"])
+    for agent in aspects or AGENTS:
+        cell = cells.get(agent)
+        if cell and cell["status"] == "ok":
+            findings.extend(cell["findings"])
     return findings
 
 
-def section_text(agent: str, result: AgentResult | None) -> str:
+def section_text(agent: AgentName, cell: TickerCell | None) -> str:
     label = AGENT_LABELS[agent]
-    if result is None:
+    if cell is None:
         return f"### {label}\n(not run)"
-    if result["status"] == "failed":
-        return f"### {label}\nUnavailable — {result['error']}"
-    lines = [f"### {label}", result["summary"], ""]
-    lines.extend(f"- [{f['id']}] {f['claim']} — {f['evidence']}" for f in result["findings"])
+    if cell["status"] == "failed":
+        return f"### {label}\nUnavailable — {cell['error']}"
+    if not cell["findings"]:
+        # Ran cleanly, found nothing. Said plainly rather than rendered as an empty
+        # section, which reads as though the data were merely omitted.
+        return f"### {label}\n{cell['summary']}"
+    lines = [f"### {label}", cell["summary"], ""]
+    lines.extend(f"- [{f['id']}] {f['claim']} — {f['evidence']}" for f in cell["findings"])
     return "\n".join(lines)
 
 
-def ticker_section_block(ticker: str, ticker_results: TickerResults) -> str:
-    body = "\n\n".join(section_text(agent, ticker_results.get(agent)) for agent in AGENTS)
+def ticker_section_block(
+    ticker: str, cells: Cells, aspects: list[AgentName] | None = None
+) -> str:
+    """Only the aspects this turn covers.
+
+    A question narrowed to one analysis ("how are Apple's fundamentals?") renders a
+    fundamentals answer — not a full report with two "(not run)" sections, which would
+    misrepresent a deliberately scoped question as a failed complete one.
+    """
+    shown = aspects or list(AGENTS)
+    body = "\n\n".join(section_text(agent, cells.get(agent)) for agent in shown)
     return f"## {ticker}\n\n{body}"
 
 
-def ticker_all_failed(ticker_results: TickerResults) -> bool:
-    return all(
-        ticker_results.get(agent, {}).get("status") != "ok"  # type: ignore[union-attr]
-        for agent in AGENTS
-    )
-
-
 def sources_section(findings: list[Finding]) -> str:
-    """One line per *unique* source, not per finding. Fundamentals/technical findings
-    for a given ticker all cite the same single Yahoo Finance fetch (the node builds one
-    `Source` and reuses it across every finding it produces — see fundamentals_node.py/
-    technical_node.py), so without deduping this reads as 5 independent fundamentals
-    sources and 5 independent technical sources when it's really one of each; only news
-    findings genuinely cite distinct URLs. Groups by the source's own identity (label,
-    url, as_of) rather than by agent/ticker, since that's what's actually shared or not —
-    no assumption needed about which agents happen to reuse a source.
+    """One line per *unique* source, not per finding.
+
+    Fundamentals and technical findings for a given ticker all cite the same single fetch —
+    the node builds one `Source` and reuses it across every finding it produces — so
+    without deduping this reads as five independent fundamentals sources when it is really
+    one. Groups by the source's own identity (label, url, as_of) rather than by agent or
+    ticker, since that is what is actually shared; only news findings genuinely cite
+    distinct URLs.
     """
     if not findings:
         return ""
     grouped: dict[tuple[str, str | None, str], list[str]] = {}
-    for f in findings:
-        src = f["source"]
-        key = (src["label"], src.get("url"), src["as_of"])
-        grouped.setdefault(key, []).append(f["id"])
+    for finding in findings:
+        source = finding["source"]
+        key = (source["label"], source.get("url"), source["as_of"])
+        grouped.setdefault(key, []).append(finding["id"])
 
     lines = ["", "", "**Sources**"]
     for (label, url, as_of), ids in grouped.items():

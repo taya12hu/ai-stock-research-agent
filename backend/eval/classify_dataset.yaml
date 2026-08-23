@@ -1,0 +1,618 @@
+# Classification eval cases. See eval/run_classify_eval.py.
+#
+# kind: plan      -> hand-written TurnIntent straight into plan_turn. No model, no network.
+# kind: classify  -> real model call, then the planner. Ticker resolution stubbed via
+#                    `resolve`, which is keyed on SYMBOLS, because that is what the real
+#                    resolver takes. Keying it on company names once made the stub more
+#                    capable than the code and hid a regression that broke every
+#                    natural-language question.
+#
+# session.researched shorthand per ticker (or per agent):
+#   fresh | stale | failed | empty | missing
+
+# ─────────────────────────── plan: scope and shape ───────────────────────────
+
+- id: narrow_after_comparison
+  kind: plan
+  why: >
+    A-01. Response shape used to only ever widen — single became comparison and never came
+    back — so this re-rendered the whole comparison with hours-old data for the company
+    nobody asked about.
+  question: "how is NVDA doing now?"
+  session:
+    researched: {NVDA: fresh, AMD: fresh}
+    last_scope: [NVDA, AMD]
+    last_shape: comparison
+  intent:
+    companies: [{name: NVDA, role: research_subject}]
+  resolved: {subjects: [NVDA], attempted: true}
+  expect:
+    kind: recall
+    scope: [NVDA]
+    shape: single
+
+- id: backward_reference_uses_last_answer_not_whole_session
+  kind: plan
+  why: >
+    "Which one" means the previous answer's companies, not everything the session has ever
+    touched. This is why last_scope is stored separately from the ticker list.
+  question: "which one is better?"
+  session:
+    researched: {NVDA: fresh, AMD: fresh, INTC: fresh}
+    last_scope: [NVDA, AMD]
+    last_shape: comparison
+  intent:
+    refers_to_prior: true
+    shape_hint: comparison
+  expect:
+    kind: recall
+    scope: [NVDA, AMD]
+    shape: comparison
+    fetch: []
+
+- id: ambiguous_reference_asks_rather_than_guessing
+  kind: plan
+  why: >
+    The scope ladder runs out. There is deliberately no rung that falls back to "all of
+    them" — that default is how a one-company question became a nine-node re-research.
+  question: "how's the other one doing?"
+  session:
+    researched: {NVDA: fresh, AMD: fresh, INTC: fresh}
+  intent:
+    refers_to_prior: true
+  expect:
+    kind: clarify
+    scope: []
+    fetch: []
+    reply_contains: [NVDA, AMD, INTC]
+
+- id: clarify_offers_only_real_choices
+  kind: plan
+  why: >
+    The clarifying question used to be free-form model text, so a session holding NVDA and
+    AMD could ask "did you mean AAPL or MSFT?" — unanswerable. The choices come from state.
+  question: "the other one"
+  session:
+    researched: {NVDA: fresh, AMD: fresh, INTC: fresh}
+  intent:
+    refers_to_prior: true
+  expect:
+    kind: clarify
+    reply_contains: [NVDA]
+    reply_excludes: [AAPL, MSFT, TSLA]
+
+- id: named_company_beats_stored_scope
+  kind: plan
+  why: Rung 1. Nothing is inherited when the message names something itself.
+  question: "what about Intel?"
+  session:
+    researched: {NVDA: fresh}
+    last_scope: [NVDA]
+  intent:
+    companies: [{name: Intel, role: research_subject}]
+    refers_to_prior: true
+  resolved: {subjects: [INTC], attempted: true}
+  expect:
+    scope: [INTC]
+    shape: single
+
+- id: portfolio_framing_does_not_survive_a_widened_set
+  kind: plan
+  why: >
+    Adding a company the user never described as a holding means they're doing something
+    new with the set, so the framing is re-derived rather than carried forward.
+  question: "compare those with Intel"
+  session:
+    researched: {NVDA: fresh, AMD: fresh}
+    last_scope: [NVDA, AMD]
+    last_shape: portfolio
+  intent:
+    companies:
+      - {name: NVDA, role: research_subject}
+      - {name: AMD, role: research_subject}
+      - {name: Intel, role: research_subject}
+  resolved: {subjects: [NVDA, AMD, INTC], attempted: true}
+  expect:
+    shape: comparison
+
+# ─────────────────────────── plan: freshness ───────────────────────────
+
+- id: only_the_stale_cell_is_refetched
+  kind: plan
+  why: >
+    fetch is a list of cells, not tickers, so partial staleness costs one node instead of
+    three.
+  question: "is NVDA still a good entry?"
+  session:
+    researched:
+      NVDA: {fundamentals: fresh, technical: stale, news: fresh}
+    last_scope: [NVDA]
+  intent:
+    companies: [{name: NVDA, role: research_subject}]
+  resolved: {subjects: [NVDA], attempted: true}
+  expect:
+    kind: research
+    fetch: ["NVDA:technical"]
+
+- id: failed_cells_are_retried_not_treated_as_fresh
+  kind: plan
+  why: >
+    A-03. Failures are stamped with a timestamp just like successes, so a company whose
+    lookups all just failed has three recent timestamps. Checking only age called that
+    fresh and never retried it.
+  question: "what's the P/E?"
+  session:
+    researched: {NVDA: failed}
+    last_scope: [NVDA]
+  intent:
+    refers_to_prior: true
+  expect:
+    kind: research
+    fetch: ["NVDA:fundamentals", "NVDA:news", "NVDA:technical"]
+
+- id: recall_does_not_sweep_the_rest_of_the_session
+  kind: plan
+  why: >
+    A-04. The old guard swept every ticker in the session, so one stale company turned a
+    single-company question into nine specialist runs.
+  question: "how is NVDA doing?"
+  session:
+    researched: {NVDA: stale, AMD: stale, INTC: stale}
+    last_scope: [NVDA, AMD, INTC]
+    last_shape: portfolio
+  intent:
+    companies: [{name: NVDA, role: research_subject}]
+  resolved: {subjects: [NVDA], attempted: true}
+  expect:
+    kind: research
+    fetch: ["NVDA:fundamentals", "NVDA:news", "NVDA:technical"]
+
+- id: successful_but_empty_cell_is_refetched
+  kind: plan
+  why: >
+    A news search that found nothing is a usable fact and useless as evidence. News absent
+    ten minutes ago may exist now.
+  question: "any news on NVDA?"
+  session:
+    researched:
+      NVDA: {fundamentals: fresh, technical: fresh, news: empty}
+    last_scope: [NVDA]
+  intent:
+    companies: [{name: NVDA, role: research_subject}]
+    aspects: [news]
+  resolved: {subjects: [NVDA], attempted: true}
+  expect:
+    kind: research
+    fetch: ["NVDA:news"]
+
+- id: technical_stays_fresh_after_the_market_closes
+  kind: plan
+  why: >
+    Technical indicators come from daily bars, so once Friday closes the last bar is final.
+    A flat wall-clock TTL would refetch identical data all weekend. Fetched Friday 16:30 ET,
+    asked Saturday.
+  question: "how does NVDA's chart look?"
+  now: "2026-08-22T16:00:00+00:00"
+  session:
+    researched:
+      NVDA: {fundamentals: fresh, technical: fresh, news: fresh}
+    last_scope: [NVDA]
+  intent:
+    companies: [{name: NVDA, role: research_subject}]
+    aspects: [technical]
+  resolved: {subjects: [NVDA], attempted: true}
+  expect:
+    kind: recall
+    fetch: []
+
+# ─────────────────────────── plan: aspects ───────────────────────────
+
+- id: single_aspect_question_fetches_one_cell
+  kind: plan
+  why: Q19. A narrowed question costs one call, not three.
+  question: "how are Apple's fundamentals?"
+  intent:
+    companies: [{name: Apple, role: research_subject}]
+    aspects: [fundamentals]
+  resolved: {subjects: [AAPL], attempted: true}
+  expect:
+    kind: research
+    aspects: [fundamentals]
+    fetch: ["AAPL:fundamentals"]
+
+- id: no_named_aspect_means_all_three
+  kind: plan
+  why: The absence of a restriction is not a restriction.
+  question: "analyse Apple"
+  intent:
+    companies: [{name: Apple, role: research_subject}]
+  resolved: {subjects: [AAPL], attempted: true}
+  expect:
+    aspects: [fundamentals, technical, news]
+    fetch_count: 3
+
+# ─────────────────────────── plan: the unclear gate ───────────────────────────
+
+- id: unclear_subject_clarifies_when_it_would_cost_a_fetch
+  kind: plan
+  why: >
+    Expensive side of the asymmetric gate: a wrong guess here spends API budget and
+    produces a confident, fully-cited report about a company nobody asked about.
+  question: "How is Amazon doing?"
+  intent:
+    companies: [{name: Amazon, role: unclear}]
+  resolved: {unclear: [AMZN], attempted: true}
+  expect:
+    kind: clarify
+    reply_contains: [Amazon]
+
+- id: unclear_subject_hedges_when_nothing_needs_fetching
+  kind: plan
+  why: >
+    Cheap side of the same gate: a wrong guess costs one paragraph the user corrects
+    immediately, so interrupting them would be the worse trade.
+  question: "How is Amazon doing?"
+  session:
+    researched: {AMZN: fresh}
+    last_scope: [AMZN]
+  intent:
+    companies: [{name: Amazon, role: unclear}]
+  resolved: {unclear: [AMZN], attempted: true}
+  expect:
+    kind: recall
+    hedged: true
+    scope: [AMZN]
+
+# ─────────────────────────── plan: the conversational lane ───────────────────────────
+
+- id: unresolvable_company_does_not_inherit_the_previous_scope
+  kind: plan
+  why: >
+    The user asked about a company we couldn't resolve. Answering about last turn's company
+    instead would be answering a question they didn't ask.
+  question: "how is Wakanda Corp doing?"
+  session:
+    researched: {NVDA: fresh}
+    last_scope: [NVDA]
+  intent:
+    companies: [{name: Wakanda Corp, role: research_subject}]
+  resolved:
+    attempted: true
+    notes: ["'WAKANDA CORP' could not be found and was skipped."]
+  expect:
+    kind: chat
+    scope: []
+    reply_contains: ["could not be found"]
+
+- id: named_company_overrides_a_screening_flag
+  kind: plan
+  why: Concrete information beats a fuzzy classification.
+  question: "which chip stocks — is NVDA good?"
+  intent:
+    companies: [{name: NVDA, role: research_subject}]
+    screening_scope: chip stocks
+  resolved: {subjects: [NVDA], attempted: true}
+  expect:
+    kind: research
+    scope: [NVDA]
+
+- id: screening_decline_never_names_a_company
+  kind: plan
+  why: >
+    Naming a company right after saying we don't pick companies is the recommendation the
+    sentence just disclaimed. Enforced in code, not asked for in a prompt.
+  question: "which Indian stocks should I buy?"
+  intent:
+    screening_scope: Indian stocks
+  expect:
+    kind: chat
+    scope: []
+    fetch: []
+    reply_contains: ["Indian stocks"]
+
+# ─────────────────────────── classify: the role judgment ───────────────────────────
+
+- id: company_mentioned_while_talking_about_a_job
+  kind: classify
+  why: >
+    The hardest case in the system. Financial-sounding words are not the test — "not doing
+    well" describes a company without asking anything about it. The request is about a
+    career.
+  question: "Amazon is not doing well, I might switch jobs"
+  resolve: {AMZN: AMZN}
+  expect_intent:
+    roles: {Amazon: incidental}
+    screening_scope_set: false
+  expect:
+    kind: chat
+    scope: []
+    fetch: []
+
+- id: same_company_as_a_real_request
+  kind: classify
+  why: The other side of the pair above — one word different, opposite outcome.
+  question: "Amazon stock is doing badly, should I be worried?"
+  resolve: {AMZN: AMZN}
+  expect_intent:
+    roles: {Amazon: research_subject}
+  expect:
+    kind: research
+    scope: [AMZN]
+    shape: single
+
+- id: incidental_mention_of_an_employer
+  kind: classify
+  why: Nothing is being asked of the company at all.
+  question: "I work at Google, what should I have for lunch?"
+  resolve: {GOOGL: GOOGL}
+  expect_intent:
+    roles: {Google: incidental}
+  expect:
+    kind: chat
+    fetch: []
+
+- id: mixed_message_researches_and_acknowledges_the_rest
+  kind: classify
+  why: >
+    Q13. One company, two roles in one sentence — the request half wins, and the personal
+    half is kept so the answer can acknowledge it rather than drop it.
+  question: "Amazon stock is falling and I'm also thinking about leaving Amazon"
+  resolve: {AMZN: AMZN}
+  expect_intent:
+    roles: {Amazon: research_subject}
+    off_domain_topic_set: true
+  expect:
+    kind: research
+    scope: [AMZN]
+    off_domain_topic_set: true
+
+- id: off_topic_with_no_company
+  kind: classify
+  why: The stock architecture is never entered.
+  question: "how do I write a resignation email?"
+  session:
+    researched: {AAPL: fresh}
+    last_scope: [AAPL]
+  expect_intent:
+    company_count: 0
+    off_domain_topic_set: true
+  expect:
+    kind: chat
+    scope: []
+    fetch: []
+
+- id: a_thank_you_is_not_a_research_request
+  kind: classify
+  why: >
+    A-11. Every message used to pay for a stock-domain classification that could route a
+    thank-you into a full re-research.
+
+    Caught intermittently on the suite's second live run, which is what made it worth
+    fixing rather than retrying: "that was helpful" genuinely does point backwards, so
+    refers_to_prior came back true, and the scope ladder happily answered about whatever
+    was last discussed. The test for that field is whether something is being *asked*, not
+    whether the message looks backwards — same principle as the research_subject judgment.
+  question: "thanks, that was helpful!"
+  session:
+    researched: {AAPL: fresh}
+    last_scope: [AAPL]
+  expect_intent:
+    company_count: 0
+    refers_to_prior: false
+  expect:
+    kind: chat
+    fetch: []
+
+- id: an_acknowledgement_is_not_a_research_request
+  kind: classify
+  why: >
+    Second sample of the same boundary, since the failure above was intermittent — one
+    passing run proves nothing about a field the model was previously split on.
+  question: "ok got it, interesting"
+  session:
+    researched: {NVDA: fresh, AMD: fresh}
+    last_scope: [NVDA, AMD]
+    last_shape: comparison
+  expect_intent:
+    refers_to_prior: false
+  expect:
+    kind: chat
+    fetch: []
+
+# ─────────────────────────── classify: scope vs company ───────────────────────────
+
+- id: screening_scope_is_recognised_without_inventing_tickers
+  kind: classify
+  why: >
+    Names a market to pick from, no company. The model must not fill in companies it thinks
+    would fit.
+  question: "which Indian stocks should I buy?"
+  expect_intent:
+    company_count: 0
+    screening_scope_set: true
+  expect:
+    kind: chat
+    scope: []
+    fetch: []
+
+- id: no_scope_named_is_clarification_not_screening
+  kind: classify
+  why: >
+    The boundary that matters. "Which stock has stronger momentum?" names no scope at all —
+    the user has companies in mind and didn't say them. Treating it as screening would
+    refuse a question we could have answered by asking.
+  question: "which stock has stronger momentum?"
+  session:
+    researched: {NVDA: fresh, AMD: fresh}
+    last_scope: [NVDA, AMD]
+    last_shape: comparison
+  expect_intent:
+    screening_scope_set: false
+  expect:
+    kind: recall
+    scope: [NVDA, AMD]
+
+- id: two_named_companies_are_a_comparison_not_a_screen
+  kind: classify
+  question: "I'm considering HDFC Bank and ICICI Bank, which is better?"
+  resolve: {HDB: HDB, IBN: IBN}
+  expect_intent:
+    screening_scope_set: false
+    company_count: 2
+  expect:
+    kind: research
+    shape: comparison
+
+# ─────────────────────────── classify: aspects and references ───────────────────────────
+
+- id: aspect_is_extracted_from_a_narrowed_question
+  kind: classify
+  why: Q19 end to end — the model must notice the question was narrowed.
+  question: "what's the RSI on NVDA right now?"
+  resolve: {NVDA: NVDA}
+  expect_intent:
+    aspects: [technical]
+  expect:
+    fetch: ["NVDA:technical"]
+
+- id: backward_reference_is_flagged_without_resolving_it
+  kind: classify
+  why: >
+    The model reports that the message points backwards; working out which company it means
+    is the planner's job.
+  question: "why?"
+  session:
+    researched: {NVDA: fresh, AMD: fresh}
+    last_scope: [NVDA, AMD]
+    last_shape: comparison
+    conversation:
+      - {role: user, content: "compare nvidia and amd"}
+      - {role: assistant, content: "...", gist: "(comparison report on NVDA, AMD)"}
+  expect_intent:
+    refers_to_prior: true
+    company_count: 0
+  expect:
+    kind: recall
+    scope: [NVDA, AMD]
+
+- id: clarification_reply_by_description
+  kind: classify
+  why: >
+    Companion to the ordinal case below. A reply can point at a choice by what the company
+    *is* rather than by name or position, and that is still a reference the model has
+    enough context to resolve.
+  question: "the bank one"
+  session:
+    researched: {NVDA: fresh, HDB: fresh}
+    last_scope: [NVDA, HDB]
+    pending:
+      question: "This session has NVDA and HDB — which did you mean?"
+      original_question: "how's the other one doing?"
+      attempts: 1
+    conversation:
+      - {role: user, content: "how's the other one doing?"}
+      - {role: assistant, content: "...", gist: "(asked which company was meant)"}
+  resolve: {HDB: HDB}
+  expect:
+    kind: recall
+    scope: [HDB]
+    shape: single
+
+- id: clarification_reply_is_just_another_message
+  kind: classify
+  why: >
+    No dedicated resolver node. The pending question is stated in the projection, so a
+    terse reply is classified as an ordinary message with the question in view.
+
+    Caught a real gap on the suite's first live run: the model reported
+    `refers_to_prior: true` with no company, which is defensible as an observation but
+    left the ladder to fall back on the previous scope — all three companies, when the
+    user had been asked to pick one. Resolving an ordinal against a list the assistant
+    just stated is a reading task, so the prompt now asks for it explicitly.
+  question: "the second one"
+  session:
+    researched: {NVDA: fresh, AMD: fresh, INTC: fresh}
+    last_scope: [NVDA, AMD, INTC]
+    pending:
+      question: "This session has NVDA, AMD and INTC — which did you mean?"
+      original_question: "how's the other one doing?"
+      attempts: 1
+    conversation:
+      - {role: user, content: "how's the other one doing?"}
+      - {role: assistant, content: "...", gist: "(asked which company was meant)"}
+  resolve: {AMD: AMD}
+  expect:
+    kind: recall
+    scope: [AMD]
+    shape: single
+
+- id: adding_a_company_extends_the_current_comparison
+  kind: classify
+  why: >
+    The counterpart to the narrowing fix, and its opposite failure. Replacing scope
+    unconditionally is what lets "how is NVDA doing on its own" drop AMD (A-01) — but
+    applied to "now also add Intel to this comparison" it produced a single-company report
+    about Intel and dropped the two companies being compared. Which of the two is meant is
+    a fact about the sentence, so the model reports it via extends_prior_scope.
+  question: "Now also add Intel to this comparison"
+  session:
+    researched: {NVDA: fresh, AMD: fresh}
+    last_scope: [NVDA, AMD]
+    last_shape: comparison
+    conversation:
+      - {role: user, content: "Compare NVIDIA and AMD"}
+      - {role: assistant, content: "...", gist: "(comparison report on NVDA, AMD)"}
+  resolve: {INTC: INTC}
+  expect_intent:
+    extends_prior_scope: true
+  expect:
+    kind: research
+    scope: [NVDA, AMD, INTC]
+    shape: comparison
+    fetch: ["INTC:fundamentals", "INTC:news", "INTC:technical"]
+
+- id: narrowing_does_not_extend_the_scope
+  kind: classify
+  why: >
+    Guard against over-correcting the case above — the A-01 narrowing behaviour has to keep
+    working, and it is the same shape of message with the opposite intent.
+  question: "How is NVDA doing on its own right now?"
+  session:
+    researched: {NVDA: fresh, AMD: fresh}
+    last_scope: [NVDA, AMD]
+    last_shape: comparison
+  resolve: {NVDA: NVDA}
+  expect_intent:
+    extends_prior_scope: false
+  expect:
+    kind: recall
+    scope: [NVDA]
+    shape: single
+
+- id: mid_session_request_for_more_companies_is_screening
+  kind: classify
+  why: >
+    Discovery surfacing mid-session rather than on the first message. Caught in a live eval
+    run that routed it to `recall`, which answered about the one company already in the
+    session — declining safely, but only because `answer_from_context`'s prompt says not to
+    invent, and phrased as a data limitation ("the research you provided only contains...")
+    rather than a capability boundary.
+
+    Classified correctly when checked by hand, so this is sampling variance on the field
+    rather than a flat failure — which is exactly what belongs in this suite, since a
+    single passing run proves nothing about a boundary the model is split on.
+  question: "What other good tech stocks should I look at?"
+  session:
+    researched: {AAPL: fresh}
+    last_scope: [AAPL]
+    last_shape: single
+    conversation:
+      - {role: user, content: "Analyze AAPL"}
+      - {role: assistant, content: "...", gist: "(single report on AAPL)"}
+  expect_intent:
+    screening_scope_set: true
+    company_count: 0
+  expect:
+    kind: chat
+    scope: []
+    fetch: []

@@ -64,6 +64,11 @@ function applyEvent(prev: ResearchStreamState, event: ResearchEvent): ResearchSt
   switch (event.type) {
     case "run_started":
       return { ...prev, status: "running" };
+    // Emitted on every turn, follow-ups included — the backend derives it from the turn
+    // plan rather than from which entry path ran, so there is no longer a separate
+    // follow-up variant. Follow-ups now also carry `query_type` (the turn's shape), which
+    // is what lets a narrowing follow-up correctly show "single" in a session that started
+    // as a comparison instead of keeping the stale header.
     case "router_completed":
       return {
         ...prev,
@@ -73,17 +78,6 @@ function applyEvent(prev: ResearchStreamState, event: ResearchEvent): ResearchSt
           queryType: event.query_type,
           tickers: event.tickers,
           notes: [...e.notes, ...event.notes],
-        })),
-      };
-    case "followup_classified":
-      return {
-        ...prev,
-        // `tickers` matters here too, not just `notes` — this is the only event that
-        // tells the frontend which tickers a follow-up is (re)researching, and without
-        // setting it the step tracker (and the ticker/agent cards it renders) never
-        // appear for a follow-up turn even though agents are actually running.
-        transcript: updateLastEntry(prev.transcript, (e) => ({
-          ...e, classified: true, tickers: event.tickers, notes: [...e.notes, ...event.notes],
         })),
       };
     case "agent_started":

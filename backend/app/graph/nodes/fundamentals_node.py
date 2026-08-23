@@ -1,11 +1,18 @@
 from __future__ import annotations
 
-from app.graph.nodes._shared import build_findings, node_result, run_structured_analysis
-from app.graph.state import Finding, ResearchState, Source, failed_result, ok_result
+from app.graph.nodes._shared import (
+    build_findings,
+    node_failed,
+    node_ok,
+    run_structured_analysis,
+    target_ticker,
+)
+from app.graph.session import SessionState
+from app.graph.state import Finding, Source
 from app.llm.errors import LLMAnalysisError
 from app.logging_config import get_logger, log_event
-from app.tools.errors import YahooFinanceError
-from app.tools.yahoo_finance import FundamentalsData, aget_fundamentals
+from app.tools.errors import MarketDataError
+from app.tools.market_data import FundamentalsData, aget_fundamentals
 
 logger = get_logger("app.graph.nodes.fundamentals")
 
@@ -54,14 +61,14 @@ def _build_prompt(data: FundamentalsData, facts: list[tuple[str, object]]) -> st
     )
 
 
-async def fundamentals_node(state: ResearchState) -> dict:
-    ticker = state["tickers"][0]
+async def fundamentals_node(state: SessionState) -> dict:
+    ticker = target_ticker(state)
 
     try:
         data = await aget_fundamentals(ticker)
-    except YahooFinanceError as exc:
+    except MarketDataError as exc:
         log_event(logger, "fundamentals data fetch failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
-        return node_result(ticker, "fundamentals", failed_result(str(exc)))
+        return node_failed(ticker, "fundamentals", str(exc))
 
     facts = _facts(data)
     if len(facts) < MIN_FACTS_FOR_ANALYSIS:
@@ -69,24 +76,25 @@ async def fundamentals_node(state: ResearchState) -> dict:
             logger, "fundamentals: too little data to analyze", session_id=state["session_id"],
             ticker=ticker, fact_count=len(facts),
         )
-        return node_result(
+        return node_failed(
             ticker, "fundamentals",
-            failed_result(f"Not enough fundamentals data was available for {ticker} to analyze."),
+            f"Not enough fundamentals data was available for {ticker} to analyze.",
         )
 
     try:
         analysis = await run_structured_analysis(_build_prompt(data, facts))
     except LLMAnalysisError as exc:
         log_event(logger, "fundamentals analysis failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
-        return node_result(ticker, "fundamentals", failed_result(str(exc)))
+        return node_failed(ticker, "fundamentals", str(exc))
 
     source = Source(
-        type="yahoo_finance",
+        type="market_data",
         label=f"{ticker} fundamentals (Finnhub)",
-        # Not literally the page this data was fetched from — it's fetched from
-        # Finnhub's token-authed API, which has no public per-ticker page to link to —
-        # but Yahoo Finance's public quote page covers the same categories of figures
-        # and is a real link a user can actually click through and verify against.
+        # A verification reference, not the fetch URL: Finnhub's API is token-authed
+        # and has no public per-ticker page, so there is nothing to link to directly.
+        # The label names the real provider; this gives the reader somewhere to check
+        # the same figures. Swap or drop it if that distinction ever needs to be
+        # sharper than the label alone makes it.
         url=f"https://finance.yahoo.com/quote/{ticker}",
         as_of=data.as_of,
     )
@@ -96,4 +104,4 @@ async def fundamentals_node(state: ResearchState) -> dict:
         logger, "fundamentals node completed", session_id=state["session_id"],
         ticker=ticker, finding_count=len(findings),
     )
-    return node_result(ticker, "fundamentals", ok_result(analysis.summary, findings))
+    return node_ok(ticker, "fundamentals", analysis.summary, findings)

@@ -2,13 +2,22 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from app.graph.nodes._shared import MAX_FINDINGS_PER_AGENT, LLMFinding, NodeAnalysis, node_result, run_structured_analysis
-from app.graph.state import Finding, ResearchState, Source, failed_result, ok_result
+from app.graph.nodes._shared import (
+    MAX_FINDINGS_PER_AGENT,
+    LLMFinding,
+    NodeAnalysis,
+    node_failed,
+    node_ok,
+    run_structured_analysis,
+    target_ticker,
+)
+from app.graph.session import SessionState
+from app.graph.state import Finding, Source
 from app.llm.errors import LLMAnalysisError
 from app.logging_config import get_logger, log_event
 from app.tools.errors import WebSearchError
 from app.tools.web_search import SearchResult, asearch_news
-from app.tools.yahoo_finance import aget_company_name
+from app.tools.market_data import aget_company_name
 
 logger = get_logger("app.graph.nodes.news")
 
@@ -64,11 +73,11 @@ def _finding_source(article: SearchResult | None) -> Source:
     )
 
 
-async def news_node(state: ResearchState) -> dict:
-    ticker = state["tickers"][0]
+async def news_node(state: SessionState) -> dict:
+    ticker = target_ticker(state)
     # `ticker` may carry a resolved exchange suffix (e.g. "TCS.NS" — see
-    # `aresolve_ticker`); strip it for the search query, since a suffix helps Yahoo
-    # Finance disambiguate a symbol but only hurts a general web search's relevance.
+    # `aresolve_ticker`); strip it for the search query, since a suffix helps the market
+    # data provider disambiguate a symbol but only hurts a general web search's relevance.
     search_term = ticker.split(".")[0]
     # The bare ticker/word alone is often ambiguous (e.g. "TITAN" matches Titan Company
     # Limited, Titan Mining Corp, and Titan International indiscriminately) — the
@@ -81,17 +90,17 @@ async def news_node(state: ResearchState) -> dict:
         results = await asearch_news(query, max_results=6)
     except WebSearchError as exc:
         log_event(logger, "news search failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
-        return node_result(ticker, "news", failed_result(str(exc)))
+        return node_failed(ticker, "news", str(exc))
 
     if not results:
         summary = f"No recent news articles were found for {ticker}."
-        return node_result(ticker, "news", ok_result(summary, []))
+        return node_ok(ticker, "news", summary, [])
 
     try:
         analysis = await run_structured_analysis(_build_prompt(ticker, company_name, results), schema=NewsAnalysis)
     except LLMAnalysisError as exc:
         log_event(logger, "news analysis failed", session_id=state["session_id"], ticker=ticker, error=str(exc))
-        return node_result(ticker, "news", failed_result(str(exc)))
+        return node_failed(ticker, "news", str(exc))
 
     findings: list[Finding] = []
     for i, f in enumerate(analysis.findings[:MAX_FINDINGS_PER_AGENT]):
@@ -111,4 +120,4 @@ async def news_node(state: ResearchState) -> dict:
         logger, "news node completed", session_id=state["session_id"],
         ticker=ticker, finding_count=len(findings), article_count=len(results),
     )
-    return node_result(ticker, "news", ok_result(summary, findings))
+    return node_ok(ticker, "news", summary, findings)

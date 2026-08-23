@@ -29,9 +29,13 @@
   expected_tickers: [NVDA, AMD]
   followups:
     - question: "Which of the two has the higher profit margin?"
-      expected_path: answer
+      expected_path: recall
     - question: "Now also add Intel to this comparison"
-      expected_path: add_ticker
+      # `add_ticker` and `refresh` are both just `research` now — whether a company
+      # was already in the session is set membership, decided in code. What actually
+      # matters here is that Intel joined the scope, which expected_tickers checks.
+      expected_path: research
+      expected_query_type: comparison
       expected_tickers: [NVDA, AMD, INTC]
 
 - id: comparison_three_stocks
@@ -70,13 +74,19 @@
   expected_query_type: comparison
   followups: []
 
-- id: followup_refresh_path
+- id: followup_asking_for_fresh_data_inside_the_cache_window
+  # Behaviour deliberately changed here, and the expectation changed with it.
+  # Previously the classifier read "fresh news today" and re-ran the news agent. It
+  # now depends on whether the stored news is actually stale, and seconds after the
+  # first turn it is not — the tool layer would hand back the identical cached
+  # response, so re-fetching costs a call and returns nothing new. Answering from
+  # what we just fetched is both cheaper and more honest.
   question: "Analyze AAPL"
   expected_query_type: single
   expected_tickers: [AAPL]
   followups:
     - question: "Any fresh news on Apple today?"
-      expected_path: refresh
+      expected_path: recall
 
 - id: followup_answer_path
   question: "Analyze AAPL"
@@ -84,7 +94,7 @@
   expected_tickers: [AAPL]
   followups:
     - question: "What is the trailing P/E ratio?"
-      expected_path: answer
+      expected_path: recall
 
 - id: portfolio_natural_language
   question: "I hold Microsoft, NVIDIA, and Amazon stock — how is my portfolio doing?"
@@ -126,19 +136,70 @@
       expected_discovery: true
 
 - id: not_discovery_when_specific_stocks_given
-  # Negative case: specific companies ARE named, so this must proceed as a normal
-  # comparison — the discovery check must not misfire just because the question is
-  # framed as "which one is best". expected_tickers uses bare symbols (no exchange
-  # suffix) since check_tickers_correct compares on the bare form either way.
+  # Negative case: specific companies ARE named, so the discovery check must not misfire
+  # just because the question is framed as "which one is best".
+  #
+  # These three are Indian listings, and coverage is US-only (ARCHITECTURE.md section 8),
+  # so the right outcome is the coverage decline — naming each one and saying it isn't
+  # supported. The expectations originally said `comparison` with all three tickers, which
+  # this app has never been able to do; the case was asserting something the documented
+  # scope rules out. What it actually guards is that named companies are treated as named
+  # companies: no screening reply, and no fabricated ticker.
   question: "I'm considering Sun Pharma, Cipla and Dr Reddy's. Which one has been affected most by recent negative news?"
-  expected_query_type: comparison
-  expected_tickers: [SUNPHARMA, CIPLA, DRREDDY]
+  expected_discovery: true
   followups: []
 
 - id: discovery_followup_similar_stocks
   # Discovery intent surfacing mid-session, not on the first message — must not be
-  # forced into add_ticker (inventing a company) or answer (improvising a suggestion).
+  # forced into research (inventing a company) or recall (improvising a suggestion).
   question: "Analyze AAPL"
   followups:
     - question: "What other good tech stocks should I look at?"
       expected_discovery: true
+
+# ── Regression cases for the audit findings this refactor closed ─────────────────
+# Each of these reproduces a bug that shipped. They are live end-to-end cases, so they
+# also prove the fix survives contact with real data and a real model, not just the
+# deterministic checks in eval/classify_dataset.yaml.
+
+- id: narrowing_followup_does_not_reprint_the_comparison
+  # A-01, the bug that started the refactor. `_dispatch_synthesis` read the session's
+  # stored query_type, which only ever ratcheted upward, so asking about one company
+  # mid-comparison re-rendered the whole thing — with hours-old data for the company
+  # nobody asked about. Shape now follows the turn's own scope.
+  question: "Compare NVIDIA and AMD"
+  expected_query_type: comparison
+  expected_tickers: [NVDA, AMD]
+  followups:
+    - question: "How is NVDA doing on its own right now?"
+      expected_query_type: single
+      expected_tickers: [NVDA]
+
+- id: single_company_question_does_not_sweep_the_portfolio
+  # A-04. The old freshness guard swept every ticker in the session, so one stale
+  # company turned a question about one company into nine specialist runs.
+  question: "I hold NVIDIA, Apple and Microsoft — how is my portfolio doing?"
+  expected_query_type: portfolio
+  expected_tickers: [NVDA, AAPL, MSFT]
+  followups:
+    - question: "Just Apple — what are its margins like?"
+      expected_query_type: single
+      expected_tickers: [AAPL]
+
+- id: repeated_vagueness_stops_asking
+  # A-07. Both old clarification resolvers could re-arm themselves with no counter
+  # anywhere, so a user replying vaguely could be asked a freshly-worded question
+  # forever. Bounded at two attempts, then a concrete way forward.
+  question: "Which one has better momentum?"
+  followups:
+    - question: "you know, the good one"
+    - question: "the better one obviously"
+
+- id: aspect_scoped_question_researches_only_that_aspect
+  # Q19. A question narrowed to one kind of analysis should cost one call, not three,
+  # and should produce an answer about that aspect rather than a report with two
+  # empty sections.
+  question: "How are Apple's fundamentals looking?"
+  expected_query_type: single
+  expected_tickers: [AAPL]
+  followups: []

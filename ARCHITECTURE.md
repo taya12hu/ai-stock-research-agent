@@ -1,530 +1,455 @@
 # Architecture — AI Stock Research Assistant
 
-## 1. Problem & Goal
+This document explains how the system works, in plain language. If you are new to the
+codebase, read sections 1–5 and you will understand the whole thing.
 
-Researching a company means pulling together fundamentals, price/technical data, and
-recent news/sentiment, then synthesizing all of it into one coherent view — normally a
-slow, manual, inconsistent process. This project builds a small multi-agent system that
-does that automatically:
+---
 
-- Specialized agents independently analyze fundamentals, technicals, and news/sentiment.
-- Agents use real external data (Finnhub, Twelve Data, DuckDuckGo web search) rather than
-  relying on model knowledge alone.
-- Findings are combined into one cited research summary — every non-trivial claim traces
-  back to a source.
-- The user watches the agents work in real time (live progress, not a single opaque
-  response) and can ask grounded follow-up questions afterward.
-- A single failed data source or agent degrades gracefully instead of crashing the run.
-- A small evaluation harness measures whether changes actually improve quality,
-  reliability, and response time — this is a learning project, not a production trading
-  platform, so the point is to demonstrate the system *works* and is *measurable*, not to
-  maximize feature surface.
+## 1. What this is
 
-## 2. Confirmed Design Decisions
+You ask a question about a company. Three specialist agents go and look things up —
+company financials, price trends, and recent news — and a final step combines what they
+found into one written answer with citations, so every claim points back to the data
+behind it.
 
-| Decision | Choice | Why |
+You watch the agents work live instead of staring at a spinner, and you can keep asking
+follow-up questions afterwards.
+
+**What it can do**
+
+- Research one company: *"Analyse NVIDIA"*
+- Compare several: *"Compare NVIDIA and AMD"*
+- Review a set of holdings: *"How is my portfolio of NVDA, AAPL and MSFT doing?"*
+- Answer follow-ups, including ones that need fresh data: *"any news on AMD today?"*
+
+**What it deliberately does not do**
+
+- Find stocks for you. It analyses companies you name; it does not screen a market or
+  sector for candidates.
+- Give personal financial advice.
+- Trade anything.
+- Cover non-US listings (a limitation of the free data plans — see §8).
+
+---
+
+## 2. The one idea that shapes everything
+
+**The language model reports what it sees. The code decides what to do.**
+
+This sounds small but it is the main design decision, and most of the structure follows
+from it.
+
+The model gets one job per message: read it and describe what is in it. Which companies
+are named? Is the message pointing back at something we discussed earlier? Which kind of
+analysis is being asked for? These are observations — a careful human could check each one
+against the message text alone.
+
+Everything else is worked out in ordinary code: which companies this answer covers, what
+form the answer takes, what data needs re-fetching, and whether to research, answer from
+memory, ask a question, or just reply.
+
+Why it matters: decisions made in code can be tested exactly, with no API key and no
+guessing. Decisions made by a model can only be sampled and hoped for. So we give the
+model the smallest possible job and compute the rest.
+
+An earlier version asked the model to pick one of six "paths". That fused several separate
+judgments into one answer, so a mistake anywhere ruined everything downstream. It also hid
+real bugs: two of those six paths (*refresh this company* vs *add a new company*) differ
+only by whether we already have the company — which is a lookup, not a judgment.
+
+---
+
+## 3. How a message flows through
+
+Every message — first or fiftieth, research or small talk — takes the same route.
+
+```
+                          Your message
+                               │
+                               ▼
+                        ┌─────────────┐
+                        │    plan     │   1 model call + lookups + plain code
+                        └─────────────┘
+                               │
+        ┌──────────────┬───────┴───────┬──────────────────┐
+        ▼              ▼               ▼                  ▼
+      chat          clarify          recall            research
+   "not something  "which company   answer from      go and fetch
+    I can help      did you mean?"  what we already   what's missing
+    with"                           have                   │
+        │              │               │                   ▼
+        │              │               │          fundamentals · technical · news
+        │              │               │            (one per company, in parallel)
+        │              │               │                   │
+        │              │               │                   ▼
+        │              │               │              wait for all
+        │              │               │                   │
+        │              │               │                   ▼
+        │              │               │            write the report
+        │              │               │                   │
+        └──────────────┴───────┬───────┴───────────────────┘
+                               ▼
+                        ┌─────────────┐
+                        │    emit     │   the only place an answer is sent
+                        └─────────────┘
+                               │
+                               ▼
+                          Your answer
+```
+
+Four outcomes, one exit. That is the whole graph.
+
+### The `plan` step, in order
+
+**1. Read the message** (one model call). Produces a short list of observations:
+
+| Observation | Meaning |
+|---|---|
+| `companies` | Each company named, and **how** it appears (see below) |
+| `refers_to_prior` | Does this point back at something? *"which one is better?"* |
+| `screening_scope` | Is it asking us to *find* stocks? *"best Indian stocks"* |
+| `shape_hint` | Does the wording ask for a comparison, a portfolio view, or one company? |
+| `aspects` | Does it ask about only financials, or only price, or only news? |
+| `off_domain_topic` | Is part of this something we can't help with? |
+
+The one real judgment here is **how** each company appears:
+
+- **research_subject** — something is being asked *about* the company.
+  *"How is Amazon stock doing?"*
+- **incidental** — the company is just background; the real subject is something else.
+  *"Amazon is not doing well, I might switch jobs"* — that question is about a career.
+- **unclear** — genuinely can't tell. *"How is Amazon doing?"* with nothing else to go on.
+
+Note that financial-sounding words do not make something a research request. *"Doing
+badly"*, *"falling"*, *"laying people off"* all describe a company without asking anything
+about it.
+
+**2. Turn names into ticker symbols.** The model says "Amazon"; this step turns that into
+`AMZN` and checks it is real. "Real" means the data provider actually has price history
+for it — not just that the string looks like a ticker. This matters: bare `TCS` matches a
+delisted company, while Tata Consultancy Services is really `TCS.NS`.
+
+Anything that doesn't resolve is dropped with a reason we can show the user.
+
+**3. Work out the plan** (plain code, no model). See §4.
+
+---
+
+## 4. Deciding scope, shape, and what to fetch
+
+Three questions, answered in order. All in plain code.
+
+### Which companies does this answer cover? (`scope`)
+
+Work down the list and stop at the first that applies:
+
+1. **Companies named in this message.** A named company always wins. Nothing is inherited.
+2. **The previous answer's companies**, if the message points backwards. Note: the
+   *previous answer's*, not everything in the session. If the session holds NVDA, AMD and
+   INTC but the last answer was about the first two, *"which one is better?"* means those
+   two.
+3. **The session's only company**, if there is exactly one. No ambiguity possible.
+4. **Nothing matched → ask.** We never guess, and we never quietly fall back to "all of
+   them".
+
+### What form should the answer take? (`shape`)
+
+- **One company in scope → a single-company report.** Always. A company cannot be compared
+  with itself.
+- Otherwise, if the wording asked for a comparison or a portfolio view, use that.
+- Otherwise, if the last answer was a portfolio view of the same companies, keep it.
+- Otherwise, compare them.
+
+The first rule is important. It is what lets an answer get *narrower*. Ask *"how is NVDA
+doing now?"* in the middle of an NVDA-vs-AMD session and you get an answer about NVDA — not
+the whole comparison again.
+
+### What data do we need to go and get? (`fetch`)
+
+We keep results in small units called **cells**. One cell = one company + one kind of
+analysis. So NVDA has a fundamentals cell, a technical cell, and a news cell.
+
+A cell needs re-fetching if any of these is true:
+
+| Reason | Meaning |
+|---|---|
+| **missing** | We have never fetched it |
+| **failed** | We tried and it failed — worth another go |
+| **empty** | It worked but found nothing usable |
+| **stale** | It is older than that kind of data stays good for |
+
+The **failed** case matters more than it looks. Every attempt records when it happened,
+including failures — so a company whose lookups all just failed has three recent
+timestamps. If you only checked timestamps, it would look perfectly fresh and would never
+be retried.
+
+**How long each kind of data stays good:**
+
+| Data | Good for | Why |
 |---|---|---|
-| Backend language | Python 3.11+ | `ddgs` (DuckDuckGo search) is a native Python library; avoids HTTP-wrapper overhead. Market data was originally `yfinance` for the same reason, but that's since been replaced — see below and §6. |
-| Market data | Finnhub (fundamentals) + Twelve Data (price history, technicals, ticker resolution) | Originally `yfinance`/Yahoo Finance for everything. Yahoo's unofficial API actively blocks cloud/datacenter IPs (confirmed via `YFRateLimitError` in production on Render, badly enough that retries didn't help), so ticker resolution and technicals moved to Twelve Data first, fundamentals followed onto Finnhub once a key was available. Both are US-market-only on their free tiers — see §6. |
-| Frontend | TypeScript + React (Vite) | Separate app, consumes the backend over HTTP/SSE. |
-| LLM provider | Groq (via `langchain-groq`) | Fast inference, tool-calling support on Llama models. |
-| Orchestration | LangGraph | Explicit state graph, native support for parallel fan-out/fan-in and checkpointed session state — a good fit for "N agents run independently, then merge." |
-| User-facing transport | Server-Sent Events (SSE) | One-directional live progress stream is simpler than WebSockets for this use case and has native browser reconnection support (`Last-Event-ID`). |
-| Query scope | Single-stock, portfolio, and comparison queries, plus off-topic/clarification/no-tickers handling | See §4 and §7. |
+| News | 5 minutes | New stories arrive constantly |
+| Price / technical | 15 minutes **while the market is open**, otherwise until it next opens | These come from *daily* bars. Once the market closes, the last bar is final and cannot change — so re-fetching every 15 minutes all evening and all weekend gets you identical data |
+| Company financials | 1 hour | Margins and growth change when results are filed, roughly quarterly |
 
-## 3. High-Level Architecture
+Nothing may be shorter than 5 minutes, because the data layer keeps its own 5-minute cache
+— asking again inside that window just hands back the same thing.
 
-```
-┌─────────────────────────┐        SSE stream         ┌──────────────────────────────┐
-│  React/TS Frontend       │◄───────────────────────────│  FastAPI Backend              │
-│  - AgentCards, grouped    │   POST /research            │  - /research (start job)      │
-│    per ticker (live)      │   GET  /research/{id}/stream│  - /research/{id}/stream (SSE)│
-│  - Inline citations +     │   POST /research/{id}/ask   │  - /research/{id}/ask (follow)│
-│    sources in the report  │───────────────────────────►│                              │
-│  - Follow-up chat feed    │                             └───────────┬──────────────────┘
-└─────────────────────────┘                             LangGraph StateGraph (per session)
-                                                                      │
-                                                             entry_router
-                                                  (state check, not classification: fresh
-                                                   session -> router, awaiting-clarification
-                                                   session -> the matching clarification
-                                                   resolver, else -> followup_router)
-                                                                      │
-                                                          router_node / clarification_response
-                                              (classify query_type, extract tickers, validate
-                                               each via Twelve Data — bad or non-US tickers are
-                                               dropped with a note, not a hard failure; a
-                                               stock-related but nameless request asks a
-                                               clarifying question instead of guessing; an
-                                               off-topic or stock-discovery request gets a
-                                               plain reply, no agents run)
-                                                                      │
-                                          dynamic fan-out (LangGraph Send / map-reduce),
-                                          one branch per resolved ticker
-                        ┌────────────────────────────┴────────────────────────────┐
-                        ▼                                                         ▼
-              per-ticker subgraph (NVDA)                              per-ticker subgraph (AMD)
-        ┌───────────┬───────────┬───────────┐                  ┌───────────┬───────────┬───────────┐
-        │Fundamentals│ Technical │   News    │        ...       │Fundamentals│ Technical │   News    │
-        │ (Finnhub) │(Twelve Data)│(DuckDuckGo)│                 │ (Finnhub) │(Twelve Data)│(DuckDuckGo)│
-        └───────────┴───────────┴───────────┘                  └───────────┴───────────┴───────────┘
-        each node: try/except + timeout, never raises — returns status ok/failed
-                        └────────────────────────────┬────────────────────────────┘
-                                                       ▼
-                                   type-aware synthesis (single / portfolio / comparison)
-                                          merges available per-ticker results,
-                                          notes any gaps explicitly, compiles citations
-                                                       ▼
-                                            Final Report (streamed)
-```
+Finally:
 
-Follow-up turns re-enter the same graph through `followup_router_node` (or, if a follow-up
-was itself too vague, `followup_clarification_response_node`) instead of `router_node` —
-see §7-§8 for the full entry-routing logic, including the off-topic/no-tickers/clarification
-short-circuits that end a turn without ever reaching the specialist nodes.
+- **Nothing to fetch → `recall`.** Answer from what we already have. No API calls.
+- **Something to fetch → `research`.** Go and get exactly those cells and write a report.
 
-Progress events (`run_started`, `router_completed`/`followup_classified`, `agent_started`,
-`agent_completed`, `report_ready`/`followup_answer_ready`, `run_completed`, `run_failed` —
-see §9) are derived at the API layer from LangGraph's `astream(stream_mode="updates")`
-output, not published by node code directly, onto a per-session, persisted
-event log. The SSE endpoint streams that log to the browser live and can replay it on
-reconnect. This event layer is independent of LangGraph's own internals, so the frontend
-never depends on framework-specific event shapes, and every function/flow that emits one
-of these events also writes to the structured log described in §9 — the event stream is
-the user-facing observability layer, the log file is the developer-facing one.
+That is a calculation, not an opinion. An earlier version let the model decide "is this
+already covered?", which had no way to notice the data had quietly gone out of date.
 
-## 4. Query Scope
+---
 
-1. **Single-stock analysis** — "Analyze NVIDIA" / "What is the financial health of Apple?"
-2. **Portfolio analysis** — "Analyze my portfolio of NVIDIA, Apple and Microsoft" → a
-   per-stock health rollup plus qualitative portfolio-level notes (sector concentration /
-   overlap). **Not in scope**: quantitative portfolio math (correlation matrices,
-   MPT-style optimization, Sharpe ratio) — a different, much larger project.
-3. **Comparison** — "Compare NVIDIA and AMD" → structured side-by-side comparison
-   (relative valuation, momentum, sentiment), explicitly framed as informational, not
-   investment advice.
-
-Requests are capped at a configurable max of 5 tickers (`MAX_TICKERS`) to keep cost and
-latency bounded.
-
-## 5. Repository Layout
-
-```
-stock-research/
-├── ARCHITECTURE.md              # this file
-├── README.md
-├── Makefile
-├── logs/
-│   └── dump.log                 # structured application log (gitignored, see §9)
-├── backend/
-│   ├── app/
-│   │   ├── main.py                      # FastAPI app, CORS, startup, /health
-│   │   ├── logging_config.py            # central logging setup -> logs/dump.log
-│   │   ├── config.py                    # env vars: GROQ_API_KEY, FINNHUB_API_KEY,
-│   │   │                                # TWELVEDATA_API_KEY, model names, timeouts, MAX_TICKERS
-│   │   ├── api/
-│   │   │   └── research_routes.py       # POST /research, GET .../stream, POST .../ask
-│   │   ├── graph/
-│   │   │   ├── state.py                 # ResearchState (multi-ticker + clarification/off-topic fields)
-│   │   │   ├── build_graph.py           # entry_router -> router/clarification/followup -> fan-out -> synthesis
-│   │   │   └── nodes/
-│   │   │       ├── _shared.py                          # shared specialist-node LLM/Finding helpers
-│   │   │       ├── _synthesis_shared.py                 # shared rendering/citation helpers for synthesis_*
-│   │   │       ├── router_node.py                       # query_type + ticker extraction/validation
-│   │   │       ├── clarification_response_node.py       # resolves a fresh-session clarification reply
-│   │   │       ├── followup_router_node.py               # answer-from-context / refresh / add-ticker
-│   │   │       ├── followup_clarification_response_node.py # resolves a follow-up clarification reply
-│   │   │       ├── answer_from_context.py               # follow-up path 1: no tool calls
-│   │   │       ├── fundamentals_node.py
-│   │   │       ├── technical_node.py
-│   │   │       ├── news_node.py
-│   │   │       ├── synthesis_single.py
-│   │   │       ├── synthesis_portfolio.py
-│   │   │       └── synthesis_comparison.py
-│   │   ├── tools/
-│   │   │   ├── yahoo_finance.py         # Finnhub (fundamentals) + Twelve Data (price/technicals/
-│   │   │   │                            # ticker resolution) + TTL cache + retries; filename is
-│   │   │   │                            # legacy (`yfinance` itself is no longer imported — see §6)
-│   │   │   ├── errors.py
-│   │   │   └── web_search.py            # DuckDuckGo (ddgs) wrapper + retries
-│   │   ├── llm/
-│   │   │   ├── groq_client.py
-│   │   │   └── errors.py                # rate-limit detection + shared fallback message
-│   │   ├── streaming/
-│   │   │   ├── events.py
-│   │   │   └── session_bus.py           # per-session event log + live subscribers
-│   │   └── memory/
-│   │       └── checkpointer.py          # LangGraph checkpointer (SQLite) per session
-│   ├── eval/
-│   │   ├── dataset.yaml                 # single/portfolio/comparison/edge/follow-up cases
-│   │   ├── run_eval.py
-│   │   ├── objective_checks.py          # structural/numeric/citation-integrity checks
-│   │   ├── judge.py                     # LLM-as-judge scoring rubric (Gemini, independent of Groq)
-│   │   └── results/                     # timestamped run outputs (gitignored)
-│   ├── tests/
-│   │   ├── test_health.py
-│   │   ├── test_tools.py
-│   │   ├── test_shared.py
-│   │   ├── test_synthesis_shared.py
-│   │   ├── test_graph.py                # incl. partial-failure, multi-ticker, clarification/off-topic cases
-│   │   ├── test_followup.py             # answer/refresh/add-ticker + follow-up clarification
-│   │   ├── test_research_routes.py
-│   │   └── test_streaming.py
-│   ├── pyproject.toml
-│   └── .env.example
-└── frontend/
-    ├── src/
-    │   ├── api/client.ts
-    │   ├── hooks/useResearchStream.ts   # SSE + Last-Event-ID reconnection
-    │   ├── lib/history.ts               # per-session conversation persistence (localStorage)
-    │   ├── components/
-    │   │   ├── Hero.tsx                 # landing state: pitch + example prompts
-    │   │   ├── QuestionInput.tsx
-    │   │   ├── Sidebar.tsx
-    │   │   ├── StatusBanner.tsx
-    │   │   ├── AgentCard.tsx
-    │   │   ├── TickerGroup.tsx
-    │   │   ├── FinalReport.tsx
-    │   │   ├── ConversationFeed.tsx      # follow-up Q&A transcript
-    │   │   └── Markdown.tsx              # shared report/answer renderer (citations, sources)
-    │   ├── types.ts
-    │   └── App.tsx
-    ├── package.json
-    └── vite.config.ts
-```
-
-## 6. Data Sources
-
-Both providers below are accessed from `backend/app/tools/yahoo_finance.py` — the filename
-is legacy (kept to limit diff churn; see git history). `yfinance`/Yahoo Finance is no longer
-used anywhere: Yahoo's unofficial API actively blocks requests from cloud/datacenter IPs
-(confirmed via `YFRateLimitError` in production on Render, badly enough that retries didn't
-fix it), so market data moved to two paid-tier-free HTTP APIs instead.
-
-**Finnhub — fundamentals** (`get_fundamentals`, `get_company_name`, `ticker_exists`)
-- `/stock/profile2`, `/quote`, `/stock/metric` (`metric=all`) → `FundamentalsData` (sector,
-  industry, margins, growth, yield, ROE, valuation multiples, etc.).
-- Finnhub's basic-financials numbers are percentages (e.g. `netProfitMarginTTM: 27.62`);
-  they're divided by 100 in this layer to match the decimal-fraction convention
-  (`profitMargins: 0.276`) so nothing downstream needs to know the provider changed.
-
-**Twelve Data — price history, technicals, ticker resolution** (`get_technical_data`,
-`resolve_ticker`)
-- Daily OHLC history → SMA20/50/200, RSI14, MACD, 52-week high/low, 1-month momentum,
-  annualized volatility (plain pandas rolling-window math, no heavy TA dependency).
-- `resolve_ticker`/`aresolve_ticker` requires real price history for a bare symbol before
-  accepting it, falling back to well-known non-US exchange suffixes on the same symbol when
-  it doesn't hold up — a bare symbol can otherwise silently collide with the wrong company
-  (observed live: bare `"TCS"` resolved to a delisted company; Tata Consultancy Services is
-  actually `"TCS.NS"`). No per-company lookup table.
-
-**Coverage limitation: US-listed stocks only.** Both providers' free tiers are effectively
-US-market-scoped. A ticker that resolves to a real, non-US company is still dropped —
-`router_node`/`followup_router_node` surface this as "isn't currently supported" rather than
-implying a typo (see `_no_tickers_node` in `build_graph.py` and the Hero UI's coverage note),
-distinct from a ticker that just doesn't exist at all.
-
-**Shared provider-integration notes**
-- Both providers signal "invalid ticker" the same way `yfinance` used to: HTTP 200 with an
-  empty/near-empty body, not an exception (Finnhub's `/stock/profile2` returns `{}` for a bad
-  symbol; Twelve Data returns `status: "error"`). Validity is checked on the *shape* of the
-  response, not on exceptions, and that contract is normalized across both providers so
-  callers don't need to special-case which one a function talks to.
-- Retries apply only to transient network errors (and Twelve Data rate limits), never to
-  "ticker doesn't exist" — that's permanent, not transient, and retrying it would just burn
-  through the free-tier rate limit for nothing.
-- Every public fetch function is wrapped with a short TTL in-memory cache (avoids re-hitting
-  the provider repeatedly, e.g. during eval runs) and, on the async side, a hard timeout.
-- Sync core + `asyncio.to_thread` async wrappers, since neither underlying HTTP call is
-  async and agent nodes run in an async LangGraph.
-
-**Web search (DuckDuckGo via `ddgs`)**
-- Query pattern: `"<company/ticker> stock news"`, recency-filtered where supported.
-- Evidence unit = title + snippet + url + date. No full-page scraping in v1 — fetching
-  and cleaning arbitrary article HTML (paywalls, bot blocks, boilerplate stripping) is
-  fragility disproportionate to this project's scope; documented as a future extension.
-  Every sentiment claim is grounded in a specific snippet + URL, not a vague summary.
-
-## 7. Graph Design (LangGraph)
-
-**State** (`ResearchState`) — ticker-list-based from the start, so single-stock is simply
-the N=1 case rather than a special path that would need a later rewrite:
+## 5. What is remembered between messages
 
 ```python
-class ResearchState(TypedDict):
-    tickers: list[str]
-    query_type: Literal["single", "portfolio", "comparison"]
-    user_question: str
-    per_ticker_results: Annotated[dict[str, TickerResults], merge_per_ticker_results]
-    final_report: str | None
-    conversation_history: Annotated[list[Message], operator.add]
+class SessionState:
     session_id: str
-    # Router/agent-level warnings surfaced to the user (invalid ticker dropped, a
-    # non-US ticker outside coverage, the MAX_TICKERS cap trimmed the request).
-    notes: Annotated[list[str], operator.add]
-    # Follow-up classification + its targets/answer — set by followup_router_node.
-    followup_path: Literal["answer", "refresh", "add_ticker", "unrelated",
-                            "discovery", "needs_clarification"] | None
-    followup_targets: list[FollowUpTarget]      # [{ticker, agents: [AgentName, ...]}, ...]
-    followup_answer: str | None
-    # When each (ticker, agent) result was produced, ISO8601 UTC — set by every specialist
-    # node on both success and failure. Backs the follow-up freshness guard (§8): distinct
-    # from Finding.source.as_of, which means something different per agent (a fetch
-    # timestamp for fundamentals, but the last trading day for technical, or an article's
-    # own publish date for news) and so can't answer "how long ago did *we* fetch this."
-    per_ticker_fetched_at: Annotated[dict[str, dict[AgentName, str]], merge_fetched_at]
-    # Set when a request is clearly stock-related but names no company; while True,
-    # entry_router routes the *next* turn deterministically to the matching resolver
-    # instead of letting an LLM re-classify it as a new, unrelated request.
-    awaiting_clarification: bool
-    clarification_question: str | None
-    pending_question: str | None                # the original ambiguous question, for LLM context only
-    pending_intent: QueryType | None             # the query_type already decided; not re-guessed on resolve
-    # Set when a message isn't stock-related at all, or asks the app to screen/discover
-    # stocks (a capability it doesn't have) — a plain reply, not a research trigger.
-    # Always explicitly cleared back to None on every other outcome.
-    off_topic_reply: str | None
-    # Which entry path last set awaiting_clarification=True ("router" vs. "followup") —
-    # tells entry_router which of the two clarification resolvers to send the next turn
-    # to, since a fresh-session reply replaces state["tickers"] outright while a
-    # follow-up-session reply must merge into the session's existing tickers instead.
-    clarification_origin: Literal["router", "followup"] | None
+    user_question: str
 
-class TickerResults(TypedDict, total=False):
-    fundamentals: AgentResult
-    technical: AgentResult
-    news: AgentResult
+    # Kept and added to
+    researched:   dict[ticker][kind] -> cell   # everything we've looked up
+    conversation: list[Message]                # the transcript
 
-class Finding(TypedDict):
-    id: str            # stable id, referenced by citation markers in the final report
-    claim: str
-    evidence: str
-    source: dict        # {type, label, url | None, as_of}
+    # Kept, but overwritten each time we answer about something
+    last_scope: list[str]     # which companies the last answer covered
+    last_shape: str           # what form that answer took
 
-class AgentResult(TypedDict):
-    status: Literal["ok", "failed"]
-    summary: str
-    findings: list[Finding]
-    error: str | None
+    # Kept only while a question is open
+    pending: {question, original_question, attempts} | None
+
+    # Thrown away and rebuilt on every single message
+    turn: TurnPlan
 ```
 
-**Flow**
+The split is the point. **`turn` never survives a message.** Scope, shape, what to fetch,
+warnings, the answer itself — all of it is rebuilt from scratch every time. Nothing from
+the last message can quietly leak into this one.
 
-0. **`entry_router`** — a state check, not an LLM classification: `awaiting_clarification`
-   routes deterministically to whichever clarification resolver matches
-   `clarification_origin`; an existing `per_ticker_results` means the session has already
-   run once, so the turn goes to `followup_router` instead of `router`. This is what keeps
-   a short clarification reply like "TCS and Infosys" from ever being at risk of being
-   misread as an unrelated new topic.
-1. **`router_node`** (fresh sessions) / **`clarification_response_node`** (resolving a
-   pending clarification) — classify `query_type` and extract tickers from free text,
-   validating each via Twelve Data (`resolve_ticker`). Invalid or non-US tickers are
-   dropped with a recorded reason rather than failing the whole request; `MAX_TICKERS` is
-   enforced. The same LLM call also decides three short-circuits that skip the specialist
-   nodes entirely: **ask a clarifying question** (stock-related, no company named — sets
-   `awaiting_clarification`), **off-topic / stock-discovery reply** (sets
-   `off_topic_reply`), or **no resolvable tickers** (a plain reply built from the drop
-   reasons, not a report-shaped one — see `_no_tickers_node`).
-2. **Dynamic fan-out** (LangGraph `Send`) spawns one per-ticker subgraph per resolved
-   ticker; each subgraph fans out internally to `fundamentals_node` / `technical_node` /
-   `news_node`. The three node implementations are reused regardless of query type —
-   comparison and portfolio differ only at the synthesis layer, not in data gathering.
-   Every node: timeout + try/except, **never raises**, always returns a valid
-   `AgentResult` (`status: "ok" | "failed"`). Nodes don't publish events themselves — the
-   API layer (§9) emits `agent_started` right before dispatching each (ticker, agent) pair
-   and `agent_completed` from the resulting `per_ticker_results` update, independent of
-   LangGraph's own internals.
-3. **`collect_results`** — a no-op join barrier: LangGraph runs it once every
-   dynamically-spawned specialist instance has settled, regardless of how many
-   (ticker, agent) pairs were fanned out.
-4. **Type-aware synthesis**, dispatched on `query_type`:
-   - `synthesis_single` — one company's report.
-   - `synthesis_portfolio` — per-stock rollup + qualitative concentration/overlap notes.
-   - `synthesis_comparison` — structured side-by-side (valuation / momentum / sentiment),
-     explicit non-advice framing.
-   - All three note missing per-ticker sections explicitly rather than omitting them,
-     compile the final citation list from every `Finding.source` used, and — if literally
-     nothing came back usable for any ticker — fall back to a plain reply instead of a
-     report-shaped one with no real content in it.
+`last_scope` and `last_shape` are the one deliberate exception, and only because *"which
+one is better?"* needs something to point at. They are a *fallback* — consulted only when
+the message names no companies of its own, and always overridden when it does.
 
-## 8. Follow-Up Conversation Design
+`pending` holds an open clarifying question. It carries a counter: after two tries we stop
+asking and say plainly *"name the ticker directly and I'll take it from there"*, instead of
+asking a third differently-worded question forever.
 
-Follow-ups **can** trigger fresh agent/tool calls — necessary once portfolio/comparison
-queries exist (e.g. "now add Intel to the comparison" or "any news on AMD today?" cannot
-be answered from stored text alone). `followup_router_node` classifies each follow-up into
-one of six `followup_path` outcomes, doing only as much work as needed:
+There is no separate handling for replies to clarifying questions. A reply is just another
+message, classified with the question it answers visible in the context. If the user
+ignores the question and asks something else, that is handled too — because it is handled
+the same way as any other message.
 
-1. **`answer`** — fully answerable from the session's stored `per_ticker_results` /
-   `final_report` / conversation history. Backstopped by a deterministic freshness guard,
-   not just the classifier's own judgment call: if any relevant ticker's
-   `per_ticker_fetched_at` is older than the tool-layer cache TTL (300s) or was never
-   fully fetched, the turn is upgraded to `refresh` instead — a single LLM call deciding
-   "already covered" has no way to notice that the data has quietly gone stale since (e.g.
-   "what's the RSI *right now*" minutes after the last fetch). Otherwise routed to
-   `answer_from_context_node`, which is given the raw per-ticker findings as well as the
-   rendered report — the report only ever carries a subset of them (`MAX_FINDINGS_PER_AGENT`),
-   so this is what lets it correctly answer something that was fetched but didn't make the
-   final report's cut, instead of wrongly saying "not covered": one grounded LLM call, no
-   tool calls.
-2. **`refresh`** — needs updated data for an *existing* ticker (e.g. "any news today for
-   NVDA?"). Re-enters the graph at just the relevant specialist node(s) via `Send`, updates
-   `per_ticker_results`, re-runs the appropriate synthesis node.
-3. **`add_ticker`** — introduces a new ticker (e.g. "compare that with Intel too"). Spawns
-   a new per-ticker subgraph, merges results, re-runs synthesis with the updated ticker
-   list (may flip `query_type`, e.g. single → comparison).
-4. **`needs_clarification`** — the follow-up is clearly about a stock in/around this
-   session but too vague to act on (e.g. "how's the other one doing?" with 3+ tickers in
-   the session). Sets `awaiting_clarification` + `clarification_origin="followup"`; the
-   *next* turn resolves through `followup_clarification_response_node`, a sibling of
-   `clarification_response_node` that merges into or selects from the session's *existing*
-   tickers instead of replacing them outright (reusing the fresh-session resolver here
-   would silently wipe out prior research the first time this path was exercised).
-5. **`unrelated`** / **`discovery`** — not stock-related, or asks the app to screen/select
-   candidate stocks (a capability this app doesn't have — it analyzes stocks it's given, it
-   doesn't discover them). Both route to the same `off_topic` reply as the router-level
-   equivalent.
+---
 
-All research-producing paths reuse the same specialist/synthesis nodes as the initial run —
-there is no parallel implementation of the research logic for follow-ups. Session state is
-loaded via the LangGraph checkpointer keyed on `session_id`.
+## 6. The three specialist agents
 
-## 9. Observability: Streaming Events + Application Log
+They run in parallel, one instance per company. They do not know about each other, and they
+never know how many others are running.
 
-Two distinct layers, serving two different audiences:
+| Agent | Where the data comes from | What it produces |
+|---|---|---|
+| **fundamentals** | Finnhub | Sector, margins, growth, valuation multiples, debt, cash |
+| **technical** | Twelve Data | SMA 20/50/200, RSI, MACD, 52-week range, momentum, volatility |
+| **news** | DuckDuckGo web search | Recent headlines and what they suggest about sentiment |
 
-**a) SSE event stream (user-facing, per session)**
-- Backed by a persisted, ordered event log (SQLite — the same store used by the
-  checkpointer). Every event gets a monotonically increasing id.
-- SSE responses set `id:` per event. On reconnect, the browser sends `Last-Event-ID`
-  automatically; the endpoint replays events after that id, then either continues live
-  (run still in progress) or closes after replay (run already finished).
-- Idle sessions (default 1h TTL) are evicted to bound storage growth.
-- If the backend process restarts mid-run, the in-flight LangGraph run is lost (accepted
-  limitation for this project's scope) but the event log and last-good state survive via
-  SQLite, so Q&A over the last completed report still works.
+Every agent follows the same three steps: fetch its one data source, ask the model to
+summarise it, and return a result. It never raises an error upward — it returns a result
+marked either `ok` or `failed`, always with a timestamp.
 
-**b) Application log file (developer-facing, `logs/dump.log`)**
-- Every node, tool call, and API request logs a structured line via the shared logger
-  configured in `backend/app/logging_config.py` — not just errors, but the flow itself:
-  entry/exit of every agent node, every external call (Finnhub/Twelve Data/DuckDuckGo/Groq)
-  with timing, every retry, every fallback taken, and every SSE event published.
-- Format: `timestamp | level | session_id | component | message | extra_fields(json)` —
-  one line per event, so `grep`/`findstr` against `logs/dump.log` can answer "what did
-  session X do" or "how long did the AMD fundamentals call take" without reading code.
-- Rotates by size (e.g. 10MB, 5 backups) so it doesn't grow unbounded during eval runs.
-- `logs/` is gitignored; `logs/.gitkeep` keeps the directory present in the repo.
+Each produces **findings**. A finding is the smallest citable unit:
 
-## 10. Fault Tolerance Strategy
+```python
+{ "id": "NVDA-fundamentals-1",
+  "claim": "Profit margins are strong",
+  "evidence": "Profit margin: 0.31",
+  "source": { "label": "NVDA fundamentals (Finnhub)", "url": ..., "as_of": ... } }
+```
 
-- **Tool-level**: timeout + try/except + limited retries on transient errors only (no
-  retry on hard failures like an invalid ticker).
-- **Node-level**: every node catches its own exceptions, always returns a valid
-  `AgentResult` — never propagates an exception into the graph.
-- **Ticker-level**: an invalid, unresolvable, or non-US ticker is dropped with a recorded
-  reason at `router_node`/`followup_router_node` (§6), not a fatal error for the whole
-  (possibly multi-ticker) request.
-- **Query-level**: an off-topic message, a stock-discovery request, or a stock-related but
-  nameless request never reaches the specialist nodes at all — it's answered directly with
-  a plain reply or a clarifying question (§7-§8), rather than running (and likely failing)
-  agents against tickers the router had to guess.
-- **Graph-level**: synthesis runs once all branches *settle* (success or failure),
-  bounded by per-node timeouts so nothing blocks indefinitely.
-- **User-facing**: partial failures are visible and explained in both the live UI (agent
-  card shows `failed: <reason>`) and the final report — never a silent drop or a hard 500.
+Every non-obvious statement in a report carries one of these ids in brackets, and every id
+used appears in the sources list at the bottom.
 
-## 11. Evaluation Harness
+**A note on technical indicators:** the maths (SMA, RSI, MACD) is plain pandas, and it is
+checked in tests against a second, independent implementation over a fixed price series.
+That is a different kind of correctness from "is this report good", and it gets a different
+kind of test.
 
-**Objective / structural checks** (`eval/objective_checks.py`; deterministic — catch real
-bugs an LLM judge might rate fine anyway). `hard` checks gate a case's overall pass/fail;
-`soft` checks are recorded but don't gate it, because what they verify is itself an LLM
-judgment call (query type, ticker extraction, follow-up routing) rather than a code-level
-guarantee — a mismatch there is a real, worth-reading finding, just not proof the run is
-broken the way a schema violation or a fabricated citation is:
-- **Schema** (hard) — `final_report`/`followup_answer`, `query_type`, and `tickers` are
-  present and well-typed.
-- **Citation integrity** (hard) — every citation marker in the final report resolves to a
-  real `Finding.id` that was actually produced (catches fabricated citations mechanically).
-- **Findings well-formed** (hard) — every finding has a non-blank `claim`/`evidence`/`id`,
-  and no agent exceeds `MAX_FINDINGS_PER_AGENT`.
-- **Total-failure explicit** (hard) — if every agent failed for a ticker, the deterministic
-  no-LLM-call fallback message is present, not silently omitted.
-- **No fabricated discovery tickers** (hard, only on `expected_discovery`-tagged turns) —
-  no *new* ticker appears versus what the session already had before that turn ran (a diff
-  against the prior turn, not just "is the list non-empty" — a follow-up session's ticker
-  list is never empty to begin with, so a bare non-empty check would false-positive on
-  every discovery-flavored follow-up regardless of what actually happened).
-- **Query type correct** (soft, only on `expected_query_type`-tagged turns) — the
-  classified `single`/`portfolio`/`comparison` matches what the dataset expects.
-- **Tickers correct** (soft, only on `expected_tickers`-tagged turns) — the extracted
-  tickers match what the dataset expects, compared as bare symbols (`TCS` vs. `TCS.NS`)
-  and as a set (order-independent).
-- **Follow-up path correct** (soft, only on `expected_path`-tagged turns) — the classified
-  `answer`/`refresh`/`add_ticker`/etc. matches what the dataset expects.
-- **Partial-failure mentioned** (soft) — when only some agents failed, the report
-  acknowledges the gap (LLM wording, not a guaranteed string).
-- **Latency** (soft) — total graph time (the harness runs in-process, bypassing HTTP, so
-  this is compute time, not time-to-first-SSE-event) against a budget scaled by ticker count.
+---
 
-Indicator math itself (SMA/RSI/MACD) is verified separately, in `backend/tests/test_tools.py`,
-against a second, independent implementation of the same formulas on a fixed price series
-— not by this harness, since it runs against live, changing market data and can't assert
-an exact expected number the way a fixed synthetic series can.
+## 7. Writing the answer
 
-**LLM-as-judge** (graded, for what can't be checked mechanically): a Gemini call
-(`gemini_client.get_judge_model`) — deliberately a different provider than Groq, which
-generates the reports being graded, so the harness isn't having a model grade its own
-output — scores each run 1-5 on grounding, relevance, completeness across the three
-research dimensions, and (for comparisons) whether the output is a genuine structured
-comparison rather than three reports stapled together. Requires `GEMINI_API_KEY`; if
-unset, judge scoring fails per-case (recorded in that case's `judge` field) without
-aborting the run, since the objective checks above don't depend on it.
+`render` takes the turn's scope and shape **as arguments** and writes the matching report:
+one company, a comparison, or a portfolio view.
 
-- `eval/dataset.yaml`: 18 cases spanning all three query types, an invalid ticker, a
-  thin-news-coverage company, discovery/clarification edge cases, and follow-up scenarios
-  (refresh, add-ticker, answer-from-context).
-- `eval/run_eval.py` runs the graph in-process (bypassing HTTP for speed), writes
-  timestamped JSON to `eval/results/`; a diff script compares two runs (baseline vs. after
-  a change) across both objective checks and judge scores.
+It does not read anything about the session. That is deliberate — an earlier version read
+the session's stored form directly, which is exactly why a narrowing follow-up used to
+re-print the whole comparison.
 
-## 12. Tech Stack Summary
+**When there isn't enough to report.** A cell counts as usable only if it succeeded *and*
+produced findings. Succeeding while finding nothing is a fact, not evidence. If too few
+companies are usable for the requested shape, you get a plain sentence explaining what
+failed — never an empty report with a heading and a verdict line and nothing behind it.
 
-- **Backend**: Python 3.11+, FastAPI, `uvicorn`, LangGraph, `langchain-groq`, `requests`
-  (Finnhub + Twelve Data), `ddgs` (DuckDuckGo), `pandas`, `tenacity` (retries),
-  `cachetools` (TTL caching), `pydantic`, `pydantic-settings`, `python-dotenv`, SQLite
-  (checkpointer + event log). `langchain-google-genai` is eval-only (§11's independent
-  judge). Config via `.env` (`GROQ_API_KEY`, `FINNHUB_API_KEY`,
-  `TWELVEDATA_API_KEY`, model names, timeouts, `MAX_TICKERS`) — never committed
-  (`.env.example` documents required keys).
-- **Frontend**: Vite + React + TypeScript, native `EventSource` (SSE, reconnect via
-  `Last-Event-ID`), Tailwind for styling.
-- **Model routing**: one capable Groq-hosted model (e.g. `openai/gpt-oss-120b`) for
-  agent reasoning/tool-use, configurable via env.
+**Then `emit` finishes the job.** It is the only place in the whole system that sends an
+answer, and it assembles the final text in this order:
 
-**Explicitly out of scope**: trading execution, user accounts/auth, multi-user scaling,
-quantitative portfolio optimization (MPT, correlation matrices, Sharpe ratio), full-page
-news scraping, billing, non-US-listed equities (§6).
+1. A hedge, if we had to assume what you meant (*"Taking that as a question about the
+   stock —"*)
+2. Which companies this covers, on short answers (reports already say so in their heading)
+3. The answer itself
+4. A coverage line, if anything was unavailable:
+   `Coverage: NVDA — technical unavailable (request timed out).`
+5. Any warnings, e.g. a company we couldn't find
+6. An acknowledgement of anything off-topic in your message
 
-## 13. Build Order
+Two things about `emit` are structural rather than stylistic.
 
-1. Backend skeleton: FastAPI app, config, logging, `.env` handling, health check.
-2. Tools layer: `yahoo_finance.py` + `web_search.py`, unit-tested against mocked responses.
-3. Graph v0, single-ticker path (`query_type="single"`, N=1): three agent nodes +
-   `synthesis_single`, verified via a direct script including a forced-failure case.
-4. Extend to N tickers: dynamic fan-out, `synthesis_portfolio`, `synthesis_comparison`.
-5. Streaming: SQLite-backed event log + SSE route with `Last-Event-ID` replay.
-6. Follow-up endpoint: `followup_router_node` with all three paths + checkpointer.
-7. Frontend: agent cards (grouped per ticker), sources panel, report views, follow-up chat.
-8. Eval harness: dataset + objective checks + judge; run once as the baseline.
+The **coverage line is generated from the data**, not written by the model. Asking a model
+to remember to mention gaps mostly works, which is the problem — "mostly" is not a
+guarantee, and this way the disclosure is always there.
 
-## 14. Verification
+And because `emit` is the *only* node that writes to the transcript, sending an answer and
+recording it are one action. No future node can send something and forget to record it.
+That used to be possible, and it happened.
 
-- Backend: `pytest backend/tests` (`test_health`, `test_tools`, `test_shared`,
-  `test_synthesis_shared`, `test_graph`, `test_followup`, `test_research_routes`,
-  `test_streaming` — provider calls mocked; graph tests include a forced
-  single-agent-failure case, a multi-ticker case with one invalid ticker, and
-  clarification/off-topic cases).
-- Manual smoke test: run all three query types end-to-end in the browser, confirm live
-  per-ticker agent cards update, citations are traceable, a reconnect mid-run resumes
-  correctly, and a follow-up that adds a new ticker updates the report.
-- Eval: `python -m eval.run_eval` (from `backend/`) produces a results JSON; re-run after
-  any future change and diff against the prior baseline.
+---
+
+## 8. Data sources
+
+**Finnhub** — company financials.
+
+**Twelve Data** — daily price history, technical indicators, and ticker checking.
+
+**DuckDuckGo** — news. Titles, snippets, links and dates only; we do not download full
+articles. Fetching and cleaning arbitrary news pages means fighting paywalls, bot blocks
+and page furniture, which is a lot of fragility for this project's scope.
+
+Both market-data providers are on free plans that effectively cover **US-listed stocks
+only**. A real non-US company is turned away with an honest *"isn't currently supported"* —
+not a message implying you typed it wrong.
+
+Some shared behaviour worth knowing:
+
+- Both providers report a bad ticker with a **success** response and an empty body, not an
+  error. So validity is judged on the *shape of what came back*.
+- Retries only happen for temporary problems (network blips, rate limits). "This ticker
+  doesn't exist" is permanent — retrying it just burns quota.
+- Everything is cached for 5 minutes and has a hard timeout.
+
+> The project originally used `yfinance`. Yahoo's unofficial API blocks cloud/datacenter
+> IPs, which retries cannot fix, so it broke in production and was replaced.
+
+---
+
+## 9. When things go wrong
+
+Failures are handled at each level, because no single level can catch everything.
+
+| Level | What happens |
+|---|---|
+| **Data fetch** | Timeout, then retry — but only for temporary failures |
+| **One agent** | Catches its own errors and returns a `failed` result. It never crashes the run |
+| **One company** | A ticker that can't be resolved is dropped with a reason; the others carry on |
+| **The whole message** | Off-topic, screening and unclear messages never reach the agents at all |
+| **The report** | Runs once every agent has finished, succeeded or failed |
+| **The model itself** | If the message can't even be classified, we say so — we do not quietly answer from old data |
+
+The rule throughout: **a failure is always visible and explained.** Never a silent gap,
+never a bare error page.
+
+---
+
+## 10. Live progress and logs
+
+Two separate things, for two different audiences.
+
+**Live progress (for you).** As the graph runs, the API turns each step into an event and
+streams it to the browser using Server-Sent Events. Events are saved to SQLite *before*
+being sent, which is what makes reconnecting work: if your connection drops, the browser
+reports the last event it saw and gets everything after it, with nothing missed and nothing
+repeated.
+
+Events are derived at the API layer from what the graph reports, not published by the nodes
+themselves. So the nodes stay free of streaming concerns, and the browser never depends on
+LangGraph's internals.
+
+**The log file (for developers).** `logs/dump.log` records every step, every external call
+with timing, every retry, every fallback taken — one structured line each:
+
+```
+timestamp | level | session_id | component | message | extra fields as JSON
+```
+
+You can answer "what did session X do?" with `grep`, without reading any code. It rotates
+by size so eval runs don't fill the disk.
+
+---
+
+## 11. Testing
+
+**Unit tests** cover the pieces individually. The important thing here is that all the
+decision-making — scope, shape, freshness, what to fetch — is plain code with no I/O, so
+those tests need no API key, no mocking, and no network. They run in milliseconds.
+
+**Graph tests** run the whole thing end to end with the providers and model stubbed, and
+cover the things that only appear once it's actually running: parallel results merging
+correctly, partial failures, and dispatching only what was asked for.
+
+**The eval harness** (`eval/`) runs real questions against the real system and scores them
+two ways:
+
+*Automatic checks* — things a computer can verify exactly:
+
+| Check | Blocks the case? | What it catches |
+|---|---|---|
+| Valid structure | Yes | Malformed output |
+| Citation integrity | Yes | Every `[id]` in the report is a real finding — catches invented citations |
+| Well-formed findings | Yes | Empty claims, missing evidence |
+| Total failure is stated | Yes | A failure silently dressed up as a report |
+| Correct type / companies / route | No | Recorded, but these are judgment calls, not guarantees |
+| Speed | No | Tracked against a budget |
+
+*A model judge* — for the things a computer can't check: is it well-grounded, does it
+actually answer the question, is a comparison a real comparison or three reports glued
+together. This uses **Gemini** rather than Groq, deliberately: the harness should not have
+a model marking its own homework.
+
+---
+
+## 12. Tech stack
+
+**Backend** — Python 3.11+, FastAPI, LangGraph, `langchain-groq`, `requests`, `ddgs`,
+`pandas`, `tenacity` (retries), `cachetools`, `pydantic`, SQLite (session state and event
+log). `langchain-google-genai` is used only by the eval judge.
+
+**Frontend** — Vite, React, TypeScript, Tailwind, and the browser's built-in `EventSource`
+for live updates.
+
+**Config** — `.env`, never committed. `.env.example` lists what you need:
+`GROQ_API_KEY`, `FINNHUB_API_KEY`, `TWELVEDATA_API_KEY`, plus optional model names,
+timeouts and `MAX_TICKERS`.
+
+---
+
+## 13. Known limits
+
+Real, and worth knowing before you rely on any of it.
+
+- **The classifier can still get it wrong.** Everything downstream is exact, but if the
+  model decides a message is about the wrong company, the rest of the system will execute
+  that mistake perfectly. This is why short answers state which companies they cover — so a
+  wrong guess is obvious immediately rather than buried.
+- **Restarting the server loses a run in progress.** Saved state and past answers survive;
+  the specific request that was mid-flight does not.
+- **One process only.** Live updates are held in memory, so running a second copy behind a
+  load balancer needs a shared message layer (Redis or similar) first. The saved event log
+  is fine — only the live push is affected.
+- **US-listed stocks only** (§8).
+- **News is headlines and snippets**, not full articles.
+- **Market holidays are not modelled.** On a holiday the system treats the market as open,
+  so price data refreshes a few extra times. Harmless, and no worse than a plain timer.
+- **No portfolio maths** — no correlations, no optimisation, no Sharpe ratios. That is a
+  different project with a different core skill.
