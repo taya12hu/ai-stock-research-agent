@@ -28,8 +28,9 @@ frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
 
-# Local tracking doc (not meant for the public repo)
+# Local working docs (not meant for the public repo)
 TODO.md
+HANDOFF.md
 
 # OS
 .DS_Store
