@@ -159,9 +159,9 @@ def off_domain(topic: str | None, session_tickers: list[str]) -> str:
     has nothing to do with ("how do I write a resignation email?").
     """
     if is_valid_slot(topic):
-        opening = f"I can't help with {_clean(topic)} — I'm a stock research assistant."
+        opening = f"I can't help with {_clean(topic)}. I'm a stock research assistant."
     else:
-        opening = "That's not something I can help with — I'm a stock research assistant."
+        opening = "That's not something I can help with. I'm a stock research assistant."
     return f"{opening} {_continue_offer(session_tickers)}"
 
 
@@ -173,7 +173,7 @@ def off_domain_with_company(company: str | None, session_tickers: list[str]) -> 
     """
     if is_valid_slot(company):
         return (
-            "That's not something I can help you weigh up — I only do stock research. "
+            "That's not something I can help you weigh up. I only do stock research. "
             f"If it's useful, I can look at how {_clean(company)} itself is doing: "
             f"{CAPABILITIES.aspects_phrase}."
         )
@@ -189,7 +189,7 @@ def mixed_acknowledgment(topic: str | None) -> str:
     if not is_valid_slot(topic):
         return ""
     return (
-        f"\n\n— On {_clean(topic)}: that's outside what I can help with, but the research "
+        f"\n\nOn {_clean(topic)}: that's outside what I can help with, but the research "
         "above may be useful input."
     )
 
@@ -207,7 +207,7 @@ def screening(scope: str | None, extracted_companies: tuple[str, ...] = ()) -> s
     else:
         boundary = "I don't screen for candidates like that"
     return (
-        f"I can research and compare specific companies, but {boundary} — I analyse the "
+        f"I can research and compare specific companies, but {boundary}. I analyse the "
         "stocks you give me. Name a few you're considering and I'll look into them."
     )
 
@@ -231,10 +231,10 @@ def clarify_intent(company: str | None) -> str:
     """
     if is_valid_slot(company):
         return (
-            f"Just to check — do you want me to look at {_clean(company)} as a stock? "
+            f"Just to check: do you want me to look at {_clean(company)} as a stock? "
             f"I'd pull {CAPABILITIES.aspects_phrase}."
         )
-    return "Just to check — is this a question about a company's stock?"
+    return "Just to check: is this a question about a company's stock?"
 
 
 def clarify_referent(session_tickers: list[str]) -> str:
@@ -245,7 +245,7 @@ def clarify_referent(session_tickers: list[str]) -> str:
         return "Which company or stock ticker would you like me to look at?"
     if len(session_tickers) == 1:
         return f"Did you mean {session_tickers[0]}?"
-    return f"This session has {join_human(session_tickers)} — which did you mean?"
+    return f"This session has {join_human(session_tickers)}. Which did you mean?"
 
 
 def clarify_exhausted(session_tickers: list[str]) -> str:
@@ -255,12 +255,12 @@ def clarify_exhausted(session_tickers: list[str]) -> str:
     """
     if session_tickers:
         return (
-            "I'm still not sure which one you mean. Name the ticker directly — "
-            f"for example {session_tickers[0]} — and I'll take it from there."
+            "I'm still not sure which one you mean. Name the ticker directly, "
+            f"for example {session_tickers[0]}, and I'll take it from there."
         )
     return (
-        "I'm still not sure which company you mean. Name it directly — for example "
-        "'AAPL' or 'Apple' — and I'll take it from there."
+        "I'm still not sure which company you mean. Name it directly, for example "
+        "'AAPL' or 'Apple', and I'll take it from there."
     )
 
 
@@ -270,7 +270,7 @@ def hedge_prefix() -> str:
     the user corrects immediately, where the same uncertainty on a fetching turn would
     spend API budget and produce a confident, fully-cited report about the wrong company.
     """
-    return "Taking that as a question about the stock —\n\n"
+    return "Taking that as a question about the stock.\n\n"
 
 
 # ─────────────────────────── failures ───────────────────────────
@@ -282,8 +282,8 @@ def classification_failed(*, rate_limited: bool) -> str:
     arbitrarily old context without telling the user classification had broken (A-06).
     """
     if rate_limited:
-        return "I'm being rate-limited by the AI provider right now — try again in a moment."
-    return "I couldn't read that one — could you rephrase it?"
+        return "I'm being rate-limited by the AI provider right now. Try again in a moment."
+    return "I couldn't read that one. Could you rephrase it?"
 
 
 def unresolved_tickers(reasons: list[str], session_tickers: list[str]) -> str:
@@ -311,4 +311,4 @@ def scope_echo(scope: list[str]) -> str:
     """
     if not scope:
         return ""
-    return f"**{join_human(scope)}** — "
+    return f"**{join_human(scope)}** · "

@@ -20,6 +20,17 @@ AGENTS = AGENT_NAMES
 
 Cells = dict[AgentName, TickerCell]
 
+# Appended to every prompt whose output reaches the user directly. Models default to em
+# dashes for parenthetical asides at a rate that makes reports read as machine-written,
+# and there is no post-processing fix: stripping them after the fact either mangles the
+# verdict separator (see the frontend's Markdown.tsx) or leaves sentences that no longer
+# parse. Asking for the punctuation up front is the only place this can be fixed cleanly.
+PROSE_STYLE = (
+    " Write in plain prose: use commas, colons and full stops for asides. Do not use em "
+    "dashes or en dashes (— or –) anywhere in your answer. Write citation ids in plain "
+    "ASCII square brackets like [id]; never use full-width or decorative brackets."
+)
+
 
 def collect_findings(cells: Cells, aspects: list[AgentName] | None = None) -> list[Finding]:
     findings: list[Finding] = []
@@ -35,13 +46,13 @@ def section_text(agent: AgentName, cell: TickerCell | None) -> str:
     if cell is None:
         return f"### {label}\n(not run)"
     if cell["status"] == "failed":
-        return f"### {label}\nUnavailable — {cell['error']}"
+        return f"### {label}\nUnavailable. {cell['error']}"
     if not cell["findings"]:
         # Ran cleanly, found nothing. Said plainly rather than rendered as an empty
         # section, which reads as though the data were merely omitted.
         return f"### {label}\n{cell['summary']}"
     lines = [f"### {label}", cell["summary"], ""]
-    lines.extend(f"- [{f['id']}] {f['claim']} — {f['evidence']}" for f in cell["findings"])
+    lines.extend(f"- [{f['id']}] {f['claim']} · {f['evidence']}" for f in cell["findings"])
     return "\n".join(lines)
 
 
@@ -79,7 +90,7 @@ def sources_section(findings: list[Finding]) -> str:
 
     lines = ["", "", "**Sources**"]
     for (label, url, as_of), ids in grouped.items():
-        url_part = f" — {url}" if url else ""
+        url_part = f" · {url}" if url else ""
         lines.append(f"- [{', '.join(ids)}] {label}{url_part} (as of {as_of})")
     return "\n".join(lines)
 

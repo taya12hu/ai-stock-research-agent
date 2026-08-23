@@ -22,6 +22,7 @@ import logging
 from app.graph.freshness import is_usable
 from app.graph.nodes._synthesis_shared import (
     AGENT_LABELS,
+    PROSE_STYLE,
     Cells,
     citation_instruction,
     collect_findings,
@@ -35,7 +36,7 @@ from app.replies import join_human
 
 logger = get_logger("app.graph.nodes.render")
 
-_NOT_ADVICE = "Note that this is not personalized financial advice."
+_NOT_ADVICE = "Note that this is not personalized financial advice." + PROSE_STYLE
 
 # How many usable tickers each shape needs before it can be written at all. A comparison
 # of one company is not a comparison; a single-stock report of zero is not a report.

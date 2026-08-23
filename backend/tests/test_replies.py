@@ -160,7 +160,9 @@ def test_off_domain_with_company_offers_the_adjacent_research() -> None:
 
 def test_mixed_acknowledgment_is_empty_when_there_is_nothing_to_acknowledge() -> None:
     assert replies.mixed_acknowledgment(None) == ""
-    assert replies.mixed_acknowledgment("the job decision").startswith("\n\n—")
+    # Blank-line separated so it reads as an aside after the report, never inline with it.
+    ack = replies.mixed_acknowledgment("the job decision")
+    assert ack.startswith("\n\nOn the job decision:")
 
 
 # ─────────────────────── unresolved tickers ───────────────────────
