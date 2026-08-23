@@ -70,9 +70,24 @@ T = TypeVar("T", bound=BaseModel)
     retry=retry_if_exception_type(_RETRYABLE_GROQ_ERRORS) | retry_if_exception(_is_tool_use_failed),
     reraise=True,
 )
-def _invoke_structured(prompt: str, schema: type[T]) -> T:
+async def _invoke_structured(prompt: str, schema: type[T]) -> T:
+    """`ainvoke`, not `invoke`.
+
+    This is the hot path for the three specialists, and they are dispatched as parallel
+    `Send` branches — nine of them for a three-ticker portfolio. The synchronous `invoke`
+    that used to be here blocked the event loop for the whole duration of each call, so
+    those branches could not overlap: they ran strictly one after another, and the graph
+    could not emit a completed node's update until the loop came free. That is why every
+    agent card used to fill in at once at the end instead of as each agent finished, and
+    why a portfolio took as long as the sum of its calls rather than the longest one.
+
+    The provider client is genuinely async — `render` and `answer_from_context` already
+    await it — so this needs no thread. (`asyncio.to_thread`, the pattern in
+    `tools/market_data.py`, is for the HTTP clients that have no async API at all.)
+    Tenacity's decorator detects a coroutine function and retries it natively.
+    """
     llm = get_chat_model().with_structured_output(schema)
-    result = llm.invoke(prompt)
+    result = await llm.ainvoke(prompt)
     if not isinstance(result, schema):
         raise LLMAnalysisError(f"unexpected structured output type: {type(result)}")
     return result
@@ -80,7 +95,7 @@ def _invoke_structured(prompt: str, schema: type[T]) -> T:
 
 async def run_structured_analysis(prompt: str, schema: type[T] = NodeAnalysis) -> T:  # type: ignore[assignment]
     try:
-        return _invoke_structured(prompt, schema)
+        return await _invoke_structured(prompt, schema)
     except LLMAnalysisError:
         raise
     except Exception as exc:
