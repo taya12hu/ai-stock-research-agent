@@ -43,10 +43,13 @@ export function QuestionInput({ onSubmit, disabled, placeholder, variant = "bar"
 
   return (
     <div
-      className={`w-full rounded-2xl border transition ${
+      className={`w-full rounded-2xl border transition focus-within:border-blue-500/60 ${
         isHero
-          ? "border-slate-700/80 bg-slate-900/70 shadow-[0_0_60px_-15px_rgba(99,102,241,0.35)] backdrop-blur"
-          : "border-slate-700/70 bg-slate-900/80 backdrop-blur"
+          ? "border-ink-700 bg-ink-900/60 shadow-[0_0_70px_-18px_rgba(37,99,235,0.55)] backdrop-blur"
+          // The bar sits directly on the artwork now that its wrapper has no background of
+          // its own, so it carries the full panel treatment: without the blur, candlestick
+          // line art reads straight through the placeholder text.
+          : "border-ink-700/80 bg-ink-900/80 backdrop-blur-md"
       }`}
     >
       <textarea
@@ -62,17 +65,17 @@ export function QuestionInput({ onSubmit, disabled, placeholder, variant = "bar"
         placeholder={
           placeholder ?? 'Ask about a stock, e.g. "Compare NVIDIA and AMD" or "Analyze my portfolio of NVDA, AAPL, MSFT"'
         }
-        className={`block w-full resize-none bg-transparent px-4 pt-3.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none disabled:opacity-50 ${
+        className={`block w-full resize-none bg-transparent px-4 pt-3.5 text-sm text-ink-100 placeholder:text-ink-500 focus:outline-none disabled:opacity-50 ${
           isHero ? "min-h-[64px]" : "min-h-[24px]"
         }`}
       />
       <div className="flex items-center justify-between px-3 pb-2.5 pt-1">
-        <span className="text-[11px] text-slate-500">Enter to send · Shift+Enter for a new line</span>
+        <span className="text-[11px] text-ink-500">Enter to send · Shift+Enter for a new line</span>
         <button
           onClick={submit}
           disabled={disabled || !value.trim()}
           aria-label="Send"
-          className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500"
+          className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-indigo-700 text-white transition hover:from-blue-500 hover:to-indigo-600 disabled:cursor-not-allowed disabled:bg-ink-800 disabled:from-ink-800 disabled:to-ink-800 disabled:text-ink-600"
         >
           {disabled ? (
             <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4 animate-spin">

@@ -7,7 +7,10 @@ import type { ResearchStreamState, TranscriptEntry } from "../types";
 function UserBubble({ question }: { question: string }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-indigo-600 px-4 py-2.5 text-sm text-white">
+      {/* The one saturated surface in the feed. Stays in the backdrop's blue family so
+          the user's turn reads as part of the composition rather than a chip pasted on
+          top of it. */}
+      <div className="max-w-[88%] rounded-2xl rounded-tr-sm bg-gradient-to-br from-blue-600 to-indigo-700 px-4 py-2.5 text-sm text-white shadow-[0_2px_22px_-6px_rgba(37,99,235,0.65)] sm:max-w-[80%]">
         {question}
       </div>
     </div>
@@ -47,7 +50,7 @@ export function ConversationFeed({ state }: { state: ResearchStreamState }) {
   const running = state.status === "running";
 
   return (
-    <div className="mx-auto max-w-6xl space-y-5 px-6 py-8">
+    <div className="mx-auto max-w-6xl space-y-5 px-4 py-5 sm:px-6 sm:py-8">
       {state.transcript.map((entry, index) => (
         <TranscriptTurn key={entry.id} entry={entry} isLast={index === state.transcript.length - 1} running={running} />
       ))}
