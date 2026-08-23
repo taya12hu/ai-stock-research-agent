@@ -1,266 +1,272 @@
 # Architecture — AI Stock Research Assistant
 
-This document explains how the system works, in plain language. If you are new to the
-codebase, read sections 1–5 and you will understand the whole thing.
+This document explains how the AI Stock Research Assistant works and how its main
+components fit together. Sections 1–5 cover the core architecture; the remaining sections
+describe the individual components in more detail.
 
 ---
 
-## 1. What this is
+## 1. Scope
 
-You ask a question about a company. Three specialist agents go and look things up —
-company financials, price trends, and recent news — and a final step combines what they
-found into one written answer with citations, so every claim points back to the data
-behind it.
+The system uses three specialist agents to collect company financials, price data, and
+recent news. A final synthesis step combines their findings into a single report, with
+citations linking each claim back to its source.
 
-You watch the agents work live instead of staring at a spinner, and you can keep asking
-follow-up questions afterwards.
+While the research is running, progress is streamed to the browser. The session also
+remains available for follow-up questions.
 
-**What it can do**
+**Supported requests**
 
-- Research one company: *"Analyse NVIDIA"*
-- Compare several: *"Compare NVIDIA and AMD"*
-- Review a set of holdings: *"How is my portfolio of NVDA, AAPL and MSFT doing?"*
-- Answer follow-ups, including ones that need fresh data: *"any news on AMD today?"*
+- Single company: *"Analyse NVIDIA"*
+- Comparison: *"Compare NVIDIA and AMD"*
+- Portfolio review: *"How is my portfolio of NVDA, AAPL and MSFT doing?"*
+- Follow-up questions, including questions that require fresh data: *"Any news on AMD
+  today?"*
 
-**What it deliberately does not do**
+**Out of scope**
 
-- Find stocks for you. It analyses companies you name; it does not screen a market or
-  sector for candidates.
-- Give personal financial advice.
-- Trade anything.
-- Cover non-US listings (a limitation of the free data plans — see §8).
-
----
-
-## 2. The one idea that shapes everything
-
-**The language model reports what it sees. The code decides what to do.**
-
-This sounds small but it is the main design decision, and most of the structure follows
-from it.
-
-The model gets one job per message: read it and describe what is in it. Which companies
-are named? Is the message pointing back at something we discussed earlier? Which kind of
-analysis is being asked for? These are observations — a careful human could check each one
-against the message text alone.
-
-Everything else is worked out in ordinary code: which companies this answer covers, what
-form the answer takes, what data needs re-fetching, and whether to research, answer from
-memory, ask a question, or just reply.
-
-Why it matters: decisions made in code can be tested exactly, with no API key and no
-guessing. Decisions made by a model can only be sampled and hoped for. So we give the
-model the smallest possible job and compute the rest.
-
-An earlier version asked the model to pick one of six "paths". That fused several separate
-judgments into one answer, so a mistake anywhere ruined everything downstream. It also hid
-real bugs: two of those six paths (*refresh this company* vs *add a new company*) differ
-only by whether we already have the company — which is a lookup, not a judgment.
+- Finding or ranking stocks across a market or sector. The system analyses companies named
+  by the user.
+- Personalised financial advice.
+- Placing or managing trades.
+- Non-US-listed companies, due to the current data provider limitations (§8).
 
 ---
 
-## 3. How a message flows through
+## 2. Design principles
 
-Every message — first or fiftieth, research or small talk — takes the same route.
+**The model extracts observations; code makes decisions.** Each message gets one model
+call, which reports what is present in the text: companies named, whether the message
+points backwards, which analyses are requested. Scope, shape, freshness and routing are
+computed from those observations in ordinary Python. This keeps the entire decision
+surface testable without an API key or network access.
 
-```
-                          Your message
-                               │
-                               ▼
-                        ┌─────────────┐
-                        │    plan     │   1 model call + lookups + plain code
-                        └─────────────┘
-                               │
-        ┌──────────────┬───────┴───────┬──────────────────┐
-        ▼              ▼               ▼                  ▼
-      chat          clarify          recall            research
-   "not something  "which company   answer from      go and fetch
-    I can help      did you mean?"  what we already   what's missing
-    with"                           have                   │
-        │              │               │                   ▼
-        │              │               │          fundamentals · technical · news
-        │              │               │            (one per company, in parallel)
-        │              │               │                   │
-        │              │               │                   ▼
-        │              │               │              wait for all
-        │              │               │                   │
-        │              │               │                   ▼
-        │              │               │            write the report
-        │              │               │                   │
-        └──────────────┴───────┬───────┴───────────────────┘
-                               ▼
-                        ┌─────────────┐
-                        │    emit     │   the only place an answer is sent
-                        └─────────────┘
-                               │
-                               ▼
-                          Your answer
+**Every message gets a fresh plan.** `TurnPlan` is rebuilt from scratch on each message
+and never persists. Nothing from the previous turn's scope, shape or fetch list can carry
+into the next one implicitly.
+
+**Failures are values, not exceptions.** Specialist agents return a result marked `ok` or
+`failed` with a timestamp. Nothing propagates upward to abort a run.
+
+**One exit point.** `emit` is the only node that sends an answer, and it records the
+transcript entry in the same operation.
+
+---
+
+## 3. Request flow
+
+Every message follows the same route regardless of type.
+
+```mermaid
+flowchart TD
+    msg([User message]) --> plan[plan<br/><i>1 model call + ticker resolution + planning</i>]
+
+    plan -->|kind = chat| emit
+    plan -->|kind = clarify| emit
+    plan -->|kind = recall| ctx[answer_from_context<br/><i>no external calls</i>]
+    plan -->|kind = research| fan{{fan out: one branch per stale cell}}
+
+    ctx --> emit
+
+    fan --> fu[fundamentals]
+    fan --> te[technical]
+    fan --> ne[news]
+
+    fu --> col[collect<br/><i>join barrier</i>]
+    te --> col
+    ne --> col
+
+    col --> render[render<br/><i>writes the report</i>]
+    render --> emit[emit<br/><i>assembles, records, sends</i>]
+    emit --> out([Answer + SSE events])
 ```
 
-Four outcomes, one exit. That is the whole graph.
+Four turn kinds, one exit.
 
-### The `plan` step, in order
-
-**1. Read the message** (one model call). Produces a short list of observations:
-
-| Observation | Meaning |
-|---|---|
-| `companies` | Each company named, and **how** it appears (see below) |
-| `refers_to_prior` | Does this point back at something? *"which one is better?"* |
-| `screening_scope` | Is it asking us to *find* stocks? *"best Indian stocks"* |
-| `shape_hint` | Does the wording ask for a comparison, a portfolio view, or one company? |
-| `aspects` | Does it ask about only financials, or only price, or only news? |
-| `off_domain_topic` | Is part of this something we can't help with? |
-
-The one real judgment here is **how** each company appears:
-
-- **research_subject** — something is being asked *about* the company.
-  *"How is Amazon stock doing?"*
-- **incidental** — the company is just background; the real subject is something else.
-  *"Amazon is not doing well, I might switch jobs"* — that question is about a career.
-- **unclear** — genuinely can't tell. *"How is Amazon doing?"* with nothing else to go on.
-
-Note that financial-sounding words do not make something a research request. *"Doing
-badly"*, *"falling"*, *"laying people off"* all describe a company without asking anything
-about it.
-
-**2. Turn names into ticker symbols.** The model says "Amazon"; this step turns that into
-`AMZN` and checks it is real. "Real" means the data provider actually has price history
-for it — not just that the string looks like a ticker. This matters: bare `TCS` matches a
-delisted company, while Tata Consultancy Services is really `TCS.NS`.
-
-Anything that doesn't resolve is dropped with a reason we can show the user.
-
-**3. Work out the plan** (plain code, no model). See §4.
-
----
-
-## 4. Deciding scope, shape, and what to fetch
-
-Three questions, answered in order. All in plain code.
-
-### Which companies does this answer cover? (`scope`)
-
-Work down the list and stop at the first that applies:
-
-1. **Companies named in this message.** A named company always wins. Nothing is inherited.
-2. **The previous answer's companies**, if the message points backwards. Note: the
-   *previous answer's*, not everything in the session. If the session holds NVDA, AMD and
-   INTC but the last answer was about the first two, *"which one is better?"* means those
-   two.
-3. **The session's only company**, if there is exactly one. No ambiguity possible.
-4. **Nothing matched → ask.** We never guess, and we never quietly fall back to "all of
-   them".
-
-### What form should the answer take? (`shape`)
-
-- **One company in scope → a single-company report.** Always. A company cannot be compared
-  with itself.
-- Otherwise, if the wording asked for a comparison or a portfolio view, use that.
-- Otherwise, if the last answer was a portfolio view of the same companies, keep it.
-- Otherwise, compare them.
-
-The first rule is important. It is what lets an answer get *narrower*. Ask *"how is NVDA
-doing now?"* in the middle of an NVDA-vs-AMD session and you get an answer about NVDA — not
-the whole comparison again.
-
-### What data do we need to go and get? (`fetch`)
-
-We keep results in small units called **cells**. One cell = one company + one kind of
-analysis. So NVDA has a fundamentals cell, a technical cell, and a news cell.
-
-A cell needs re-fetching if any of these is true:
-
-| Reason | Meaning |
-|---|---|
-| **missing** | We have never fetched it |
-| **failed** | We tried and it failed — worth another go |
-| **empty** | It worked but found nothing usable |
-| **stale** | It is older than that kind of data stays good for |
-
-The **failed** case matters more than it looks. Every attempt records when it happened,
-including failures — so a company whose lookups all just failed has three recent
-timestamps. If you only checked timestamps, it would look perfectly fresh and would never
-be retried.
-
-**How long each kind of data stays good:**
-
-| Data | Good for | Why |
+| Kind | Trigger | External calls |
 |---|---|---|
-| News | 5 minutes | New stories arrive constantly |
-| Price / technical | 15 minutes **while the market is open**, otherwise until it next opens | These come from *daily* bars. Once the market closes, the last bar is final and cannot change — so re-fetching every 15 minutes all evening and all weekend gets you identical data |
-| Company financials | 1 hour | Margins and growth change when results are filed, roughly quarterly |
-
-Nothing may be shorter than 5 minutes, because the data layer keeps its own 5-minute cache
-— asking again inside that window just hands back the same thing.
-
-Finally:
-
-- **Nothing to fetch → `recall`.** Answer from what we already have. No API calls.
-- **Something to fetch → `research`.** Go and get exactly those cells and write a report.
-
-That is a calculation, not an opinion. An earlier version let the model decide "is this
-already covered?", which had no way to notice the data had quietly gone out of date.
+| `chat` | No researchable subject — greeting, acknowledgement, off-domain request, screening request | Classifier only |
+| `clarify` | Scope could not be resolved | Classifier only |
+| `recall` | Scope resolved, every cell already fresh | Classifier + one synthesis call |
+| `research` | Scope resolved, one or more cells stale | Classifier + one call per cell + one synthesis call |
 
 ---
 
-## 5. What is remembered between messages
+## 4. State model
+
+Two separate objects with different lifetimes.
+
+### Session state — persists across messages
 
 ```python
-class SessionState:
+class SessionState(TypedDict):
     session_id: str
     user_question: str
 
-    # Kept and added to
-    researched:   dict[ticker][kind] -> cell   # everything we've looked up
-    conversation: list[Message]                # the transcript
+    researched:   dict[ticker][agent] -> TickerCell   # accumulated, merged
+    conversation: list[ConversationMessage]           # appended
 
-    # Kept, but overwritten each time we answer about something
-    last_scope: list[str]     # which companies the last answer covered
-    last_shape: str           # what form that answer took
+    last_scope: list[str]      # overwritten by emit
+    last_shape: Shape          # overwritten by emit
 
-    # Kept only while a question is open
-    pending: {question, original_question, attempts} | None
-
-    # Thrown away and rebuilt on every single message
-    turn: TurnPlan
+    pending: PendingClarification | None
+    turn: TurnPlan             # replaced every message
 ```
 
-The split is the point. **`turn` never survives a message.** Scope, shape, what to fetch,
-warnings, the answer itself — all of it is rebuilt from scratch every time. Nothing from
-the last message can quietly leak into this one.
+| Field | Lifetime | Purpose |
+|---|---|---|
+| `researched` | Grows, never reset | Cell store, keyed by ticker then agent |
+| `conversation` | Appended | Transcript, written only by `emit` |
+| `last_scope` / `last_shape` | Overwritten per answer | Antecedent for backward references |
+| `pending` | Until resolved or exhausted | Open clarifying question plus attempt count |
 
-`last_scope` and `last_shape` are the one deliberate exception, and only because *"which
-one is better?"* needs something to point at. They are a *fallback* — consulted only when
-the message names no companies of its own, and always overridden when it does.
+`last_scope` and `last_shape` are consulted only when the current message names no
+companies of its own, and are overridden whenever it does.
 
-`pending` holds an open clarifying question. It carries a counter: after two tries we stop
-asking and say plainly *"name the ticker directly and I'll take it from there"*, instead of
-asking a third differently-worded question forever.
+`pending` carries an attempt counter. After two attempts the system stops asking and
+requests a ticker directly, rather than issuing further rephrased questions.
 
-There is no separate handling for replies to clarifying questions. A reply is just another
-message, classified with the question it answers visible in the context. If the user
-ignores the question and asks something else, that is handled too — because it is handled
-the same way as any other message.
+Replies to clarifying questions are not special-cased. A reply is classified like any
+other message, with the open question visible in context, so a user who ignores the
+question and asks something else is handled by the same path.
+
+### Turn plan — rebuilt every message
+
+```python
+class TurnPlan(TypedDict):
+    kind:  TurnKind          # research | recall | clarify | chat
+    scope: list[str]         # tickers this answer covers
+    shape: Shape             # single | comparison | portfolio
+    aspects: list[AgentName] # which analyses this turn covers
+    fetch: list[CellRef]     # exactly the cells failing the freshness check
+    notes: list[str]         # user-facing warnings, e.g. a dropped ticker
+    reply: str | None        # prebuilt text for chat and clarify turns
+    hedged: bool             # scope came from an ambiguous subject
+    off_domain_topic: str | None
+    output: TurnOutput | None
+```
+
+`scope` is a subset or superset of the session's tickers, never implicitly all of them.
+`fetch` is per `(ticker, agent)` cell rather than per ticker, so one stale cell re-runs one
+node.
 
 ---
 
-## 6. The three specialist agents
+## 5. Turn planning
 
-They run in parallel, one instance per company. They do not know about each other, and they
-never know how many others are running.
+### Step 1 — classify (one model call)
 
-| Agent | Where the data comes from | What it produces |
+The classifier returns observations only:
+
+| Field | Meaning |
+|---|---|
+| `companies` | Each company named, with its role (below) |
+| `extends_prior_scope` | Does this add to the companies in play rather than replace them? *"add Intel to this comparison"* |
+| `refers_to_prior` | Does it ask about something already discussed? *"which one is better?"* |
+| `screening_scope` | Does it ask the system to find candidates? *"best Indian stocks"* |
+| `shape_hint` | Does the wording request a comparison or portfolio view? |
+| `aspects` | Is it restricted to financials, price, or news? |
+| `pleasantry` | Is the message purely a greeting or acknowledgement? |
+| `off_domain_topic` | Is any part of it outside what the system does? |
+
+Each company carries a role:
+
+- **`research_subject`** — something is asked about the company. *"How is Amazon stock
+  doing?"*
+- **`incidental`** — the company is context for a different subject. *"Amazon is not doing
+  well, I might switch jobs"* is a question about a career.
+- **`unclear`** — indeterminate from the message alone. *"How is Amazon doing?"* with no
+  prior context.
+
+Financial-sounding vocabulary does not by itself make a message a research request.
+*"Doing badly"*, *"falling"* and *"laying people off"* describe a company without asking
+anything about it.
+
+### Step 2 — resolve tickers
+
+Company names are resolved to symbols and validated against the price provider. Validation
+requires actual price history, not a well-formed string: bare `TCS` matches a delisted US
+company, while Tata Consultancy Services is `TCS.NS`. Unresolved companies are dropped and
+recorded in `notes`.
+
+### Step 3 — plan (no model call)
+
+**Scope**
+
+```mermaid
+flowchart TD
+    A{Companies named<br/>in this message?} -->|yes, extending| B[last_scope + named]
+    A -->|yes, replacing| C[Named companies only]
+    A -->|no| D{Refers to prior,<br/>and last_scope exists?}
+    D -->|yes| E[last_scope]
+    D -->|no| F{Session has exactly<br/>one ticker?}
+    F -->|yes| G[That ticker]
+    F -->|no| H[kind = clarify]
+```
+
+A named company replaces the previous scope unless the message signals it is adding to it.
+There is no rung that falls back to the whole session.
+
+**Shape**
+
+1. One ticker in scope → `single`. A company cannot be compared with itself, so this is
+   checked before the model's hint and is what allows an answer to narrow.
+2. Otherwise use `shape_hint` if it specified comparison or portfolio.
+3. Otherwise keep `portfolio` if the previous answer was a portfolio view over the same
+   set.
+4. Otherwise `comparison`.
+
+**Fetch**
+
+Results are stored as **cells**: one cell is one ticker plus one analysis. A cell is
+re-fetched when any of the following holds.
+
+| Condition | Meaning |
+|---|---|
+| missing | Never fetched |
+| failed | Previous attempt failed |
+| empty | Succeeded but produced no usable findings |
+| stale | Older than that data type's validity window |
+
+Failed attempts are timestamped like successful ones. Freshness therefore checks status as
+well as age — otherwise a ticker whose three lookups all failed would present three recent
+timestamps and never be retried.
+
+| Data | Validity | Rationale |
 |---|---|---|
-| **fundamentals** | Finnhub | Sector, margins, growth, valuation multiples, debt, cash |
-| **technical** | Twelve Data | SMA 20/50/200, RSI, MACD, 52-week range, momentum, volatility |
-| **news** | DuckDuckGo web search | Recent headlines and what they suggest about sentiment |
+| News | 5 minutes | Continuous publication |
+| Price / technical | 15 minutes while the market is open, otherwise until the next open | Daily bars are final once the market closes |
+| Company financials | 1 hour | Changes on quarterly filings |
 
-Every agent follows the same three steps: fetch its one data source, ask the model to
-summarise it, and return a result. It never raises an error upward — it returns a result
-marked either `ok` or `failed`, always with a timestamp.
+No window may be shorter than the data layer's own 5-minute cache, which is asserted at
+import: a shorter TTL would produce refetches that return the cached value and appear to
+have worked.
 
-Each produces **findings**. A finding is the smallest citable unit:
+An empty `fetch` list produces `kind = recall`; a non-empty one produces `kind = research`.
+
+---
+
+## 6. Specialist agents
+
+One instance per `(ticker, agent)` cell in `fetch`, dispatched as parallel branches. Agents
+have no knowledge of each other or of how many branches exist — `scope` is narrowed to a
+single ticker per branch.
+
+| Agent | Source | Output |
+|---|---|---|
+| `fundamentals` | Finnhub | Sector, margins, growth, valuation multiples, debt, cash |
+| `technical` | Twelve Data | SMA 20/50/200, RSI, MACD, 52-week range, momentum, volatility |
+| `news` | DuckDuckGo | Recent headlines and sentiment |
+
+Each agent fetches its source, calls the model for a structured summary, and returns a
+result. Both the data fetch and the model call are awaited, so branches genuinely overlap;
+a blocking call in this path serialises the whole fan-out.
+
+Model calls use a forced-tool-call schema with a bounded retry. Groq occasionally answers a
+structured-output prompt in plain text (`tool_use_failed`), which is sampling variance and
+succeeds on a retry with the same prompt; a malformed request is not retried.
+
+Each agent produces **findings** — the smallest citable unit:
 
 ```python
 { "id": "NVDA-fundamentals-1",
@@ -269,187 +275,193 @@ Each produces **findings**. A finding is the smallest citable unit:
   "source": { "label": "NVDA fundamentals (Finnhub)", "url": ..., "as_of": ... } }
 ```
 
-Every non-obvious statement in a report carries one of these ids in brackets, and every id
-used appears in the sources list at the bottom.
-
-**A note on technical indicators:** the maths (SMA, RSI, MACD) is plain pandas, and it is
-checked in tests against a second, independent implementation over a fixed price series.
-That is a different kind of correctness from "is this report good", and it gets a different
-kind of test.
+Every non-obvious statement in a report carries a finding id in brackets, and every cited
+id appears in the sources list.
 
 ---
 
-## 7. Writing the answer
+## 7. Report generation
 
-`render` takes the turn's scope and shape **as arguments** and writes the matching report:
-one company, a comparison, or a portfolio view.
+### `render`
 
-It does not read anything about the session. That is deliberate — an earlier version read
-the session's stored form directly, which is exactly why a narrowing follow-up used to
-re-print the whole comparison.
+Takes `scope`, `shape` and `aspects` as arguments and writes the matching report: single,
+comparison, or portfolio. It reads no session-level fields, so a narrowing follow-up cannot
+re-render companies outside its scope.
 
-**When there isn't enough to report.** A cell counts as usable only if it succeeded *and*
-produced findings. Succeeding while finding nothing is a fact, not evidence. If too few
-companies are usable for the requested shape, you get a plain sentence explaining what
-failed — never an empty report with a heading and a verdict line and nothing behind it.
+A cell counts as **usable** only if it succeeded *and* produced findings — succeeding while
+finding nothing is a fact, not evidence. Each shape has a minimum usable count
+(`comparison` requires two). Below that threshold the turn returns a plain explanation of
+what failed rather than a report shell with a heading and a verdict line behind no data.
 
-**Then `emit` finishes the job.** It is the only place in the whole system that sends an
-answer, and it assembles the final text in this order:
+Prompts carry two constraints that the code enforces rather than requests: citation ids
+must come from the list of findings actually produced, and square brackets are reserved for
+those ids. Output style is constrained to plain punctuation.
 
-1. A hedge, if we had to assume what you meant (*"Taking that as a question about the
-   stock —"*)
-2. Which companies this covers, on short answers (reports already say so in their heading)
-3. The answer itself
-4. A coverage line, if anything was unavailable:
-   `Coverage: NVDA — technical unavailable (request timed out).`
-5. Any warnings, e.g. a company we couldn't find
-6. An acknowledgement of anything off-topic in your message
+If the synthesis call fails, the rendered sections are emitted as-is. They are already a
+complete cited document; the narrative is lost, the research is not.
 
-Two things about `emit` are structural rather than stylistic.
+### `emit`
 
-The **coverage line is generated from the data**, not written by the model. Asking a model
-to remember to mention gaps mostly works, which is the problem — "mostly" is not a
-guarantee, and this way the disclosure is always there.
+The only node that sends an answer, and the only writer to `conversation`. It assembles the
+final text in order:
 
-And because `emit` is the *only* node that writes to the transcript, sending an answer and
-recording it are one action. No future node can send something and forget to record it.
-That used to be possible, and it happened.
+1. Hedge prefix, if `hedged`
+2. Scope echo, on short answers — reports state their scope in the heading
+3. The answer
+4. Coverage line, if anything was unavailable:
+   `Coverage: NVDA - technical unavailable (request timed out).`
+5. `notes`, on research and recall turns
+6. Off-domain acknowledgement, on research and recall turns
+
+The coverage line is generated from cell status, not written by the model, so gap
+disclosure does not depend on the model remembering to mention it.
+
+Items 5 and 6 are restricted to turns that produced research. On a `chat` turn the reply
+already names the off-domain topic, and there is no research above for the acknowledgement
+to refer to.
+
+`emit` also writes `last_scope` and `last_shape`, which is what makes the next backward
+reference resolvable.
 
 ---
 
 ## 8. Data sources
 
-**Finnhub** — company financials.
-
-**Twelve Data** — daily price history, technical indicators, and ticker checking.
-
-**DuckDuckGo** — news. Titles, snippets, links and dates only; we do not download full
-articles. Fetching and cleaning arbitrary news pages means fighting paywalls, bot blocks
-and page furniture, which is a lot of fragility for this project's scope.
-
-Both market-data providers are on free plans that effectively cover **US-listed stocks
-only**. A real non-US company is turned away with an honest *"isn't currently supported"* —
-not a message implying you typed it wrong.
-
-Some shared behaviour worth knowing:
-
-- Both providers report a bad ticker with a **success** response and an empty body, not an
-  error. So validity is judged on the *shape of what came back*.
-- Retries only happen for temporary problems (network blips, rate limits). "This ticker
-  doesn't exist" is permanent — retrying it just burns quota.
-- Everything is cached for 5 minutes and has a hard timeout.
-
-> The project originally used `yfinance`. Yahoo's unofficial API blocks cloud/datacenter
-> IPs, which retries cannot fix, so it broke in production and was replaced.
-
----
-
-## 9. When things go wrong
-
-Failures are handled at each level, because no single level can catch everything.
-
-| Level | What happens |
+| Provider | Used for |
 |---|---|
-| **Data fetch** | Timeout, then retry — but only for temporary failures |
-| **One agent** | Catches its own errors and returns a `failed` result. It never crashes the run |
-| **One company** | A ticker that can't be resolved is dropped with a reason; the others carry on |
-| **The whole message** | Off-topic, screening and unclear messages never reach the agents at all |
-| **The report** | Runs once every agent has finished, succeeded or failed |
-| **The model itself** | If the message can't even be classified, we say so — we do not quietly answer from old data |
+| Finnhub | Company financials |
+| Twelve Data | Daily price history, technical indicators, ticker validation |
+| DuckDuckGo | News titles, snippets, links, dates |
 
-The rule throughout: **a failure is always visible and explained.** Never a silent gap,
-never a bare error page.
+Full article text is not retrieved; the evidence unit is the search result.
+
+Both market-data providers run on free plans that effectively cover **US-listed stocks
+only**. A valid non-US company is refused with an explicit *"isn't currently supported"*
+rather than a message implying a typo.
+
+Shared behaviour:
+
+- Both providers report an invalid ticker with a success response and an empty body.
+  Validity is therefore judged on response shape, not status code.
+- Retries apply to transient failures only — network errors, rate limits, provider 5xx. A
+  non-existent ticker is permanent and is not retried.
+- All calls are cached for 5 minutes and bounded by a timeout.
+
+Indicator maths (SMA, RSI, MACD) is implemented in pandas and verified in tests against an
+independent implementation over a fixed price series.
 
 ---
 
-## 10. Live progress and logs
+## 9. Failure handling
 
-Two separate things, for two different audiences.
+| Level | Behaviour |
+|---|---|
+| Data fetch | Timeout, then retry — transient failures only |
+| Agent | Catches its own errors, returns a `failed` cell, never aborts the run |
+| Ticker | Unresolvable tickers are dropped with a reason; remaining tickers proceed |
+| Message | Off-domain, screening and pleasantry turns never reach the agents |
+| Report | Runs once every dispatched agent has settled, succeeded or failed |
+| Classifier | A classification failure is reported, not answered around with stale context |
 
-**Live progress (for you).** As the graph runs, the API turns each step into an event and
-streams it to the browser using Server-Sent Events. Events are saved to SQLite *before*
-being sent, which is what makes reconnecting work: if your connection drops, the browser
-reports the last event it saw and gets everything after it, with nothing missed and nothing
-repeated.
+Every failure is surfaced with a reason. Silent gaps and bare error states are not
+acceptable outcomes at any level.
 
-Events are derived at the API layer from what the graph reports, not published by the nodes
-themselves. So the nodes stay free of streaming concerns, and the browser never depends on
-LangGraph's internals.
+---
 
-**The log file (for developers).** `logs/dump.log` records every step, every external call
-with timing, every retry, every fallback taken — one structured line each:
+## 10. Streaming and logging
+
+### Live progress
+
+The API derives events from graph execution and streams them over Server-Sent Events.
+Nodes do not publish events themselves, so node code stays free of streaming concerns and
+the client does not depend on LangGraph internals.
+
+| Event | Emitted when |
+|---|---|
+| `run_started` | Run begins |
+| `router_completed` | Plan built — carries shape, scope, notes |
+| `agent_started` | One per dispatched cell, published up front |
+| `agent_completed` | As each agent settles, with status, summary and findings |
+| `report_ready` / `followup_answer_ready` | Output produced |
+| `run_completed` / `run_failed` | Run ends |
+
+`agent_started` defines the set of cells the turn is running, which is what the client
+renders progress from. The turn's `aspects` is not published: it describes what the user
+asked about, which differs from what is dispatched whenever a follow-up re-fetches only
+stale cells.
+
+Events are persisted to SQLite before being sent. A client reconnecting reports the last
+event id it saw and receives everything after it, with no loss and no duplication.
+
+### Log file
+
+`logs/dump.log` records every node, external call with timing, retry and fallback as one
+structured line:
 
 ```
 timestamp | level | session_id | component | message | extra fields as JSON
 ```
 
-You can answer "what did session X do?" with `grep`, without reading any code. It rotates
-by size so eval runs don't fill the disk.
+A session's full behaviour is reconstructable with `grep`. The file rotates by size.
 
 ---
 
 ## 11. Testing
 
-**Unit tests** cover the pieces individually. The important thing here is that all the
-decision-making — scope, shape, freshness, what to fetch — is plain code with no I/O, so
-those tests need no API key, no mocking, and no network. They run in milliseconds.
+**Unit tests** cover planning in isolation. Scope, shape, freshness and fetch are pure
+functions of `(observations, resolution, state, clock)`, so these tests require no API key,
+no mocking and no network.
 
-**Graph tests** run the whole thing end to end with the providers and model stubbed, and
-cover the things that only appear once it's actually running: parallel results merging
-correctly, partial failures, and dispatching only what was asked for.
+**Graph tests** run the full graph with providers and model stubbed, covering behaviour
+that only appears end to end: parallel result merging, partial failure, and dispatching
+only the requested cells.
 
-**The eval harness** (`eval/`) runs real questions against the real system and scores them
-two ways:
+**Eval harness** (`eval/`) runs real questions against the real system and scores them two
+ways.
 
-*Automatic checks* — things a computer can verify exactly:
+Deterministic checks:
 
-| Check | Blocks the case? | What it catches |
+| Check | Blocking | Catches |
 |---|---|---|
 | Valid structure | Yes | Malformed output |
-| Citation integrity | Yes | Every `[id]` in the report is a real finding — catches invented citations |
+| Citation integrity | Yes | `[id]` markers that resolve to no real finding |
 | Well-formed findings | Yes | Empty claims, missing evidence |
-| Total failure is stated | Yes | A failure silently dressed up as a report |
-| Correct type / companies / route | No | Recorded, but these are judgment calls, not guarantees |
-| Speed | No | Tracked against a budget |
+| Total failure stated | Yes | A failed run presented as a report |
+| Query type / companies / route | No | Recorded; these are judgment calls |
+| Latency | No | Tracked against a budget |
 
-*A model judge* — for the things a computer can't check: is it well-grounded, does it
-actually answer the question, is a comparison a real comparison or three reports glued
-together. This uses **Gemini** rather than Groq, deliberately: the harness should not have
-a model marking its own homework.
+A model judge covers what cannot be checked mechanically: grounding, relevance,
+completeness, and whether a comparison is genuinely comparative rather than separate
+reports concatenated. The judge runs on Gemini rather than Groq so the harness is not
+grading its own output.
 
 ---
 
 ## 12. Tech stack
 
 **Backend** — Python 3.11+, FastAPI, LangGraph, `langchain-groq`, `requests`, `ddgs`,
-`pandas`, `tenacity` (retries), `cachetools`, `pydantic`, SQLite (session state and event
-log). `langchain-google-genai` is used only by the eval judge.
+`pandas`, `tenacity`, `cachetools`, `pydantic`, SQLite for session state and the event log.
+`langchain-google-genai` is used only by the eval judge.
 
-**Frontend** — Vite, React, TypeScript, Tailwind, and the browser's built-in `EventSource`
-for live updates.
+**Frontend** — Vite, React, TypeScript, Tailwind, and the browser's `EventSource` for live
+updates.
 
-**Config** — `.env`, never committed. `.env.example` lists what you need:
-`GROQ_API_KEY`, `FINNHUB_API_KEY`, `TWELVEDATA_API_KEY`, plus optional model names,
-timeouts and `MAX_TICKERS`.
+**Config** — `.env`, not committed. `.env.example` lists the required keys: `GROQ_API_KEY`,
+`FINNHUB_API_KEY`, `TWELVEDATA_API_KEY`, plus optional model names, timeouts and
+`MAX_TICKERS`.
 
 ---
 
 ## 13. Known limits
 
-Real, and worth knowing before you rely on any of it.
-
-- **The classifier can still get it wrong.** Everything downstream is exact, but if the
-  model decides a message is about the wrong company, the rest of the system will execute
-  that mistake perfectly. This is why short answers state which companies they cover — so a
-  wrong guess is obvious immediately rather than buried.
-- **Restarting the server loses a run in progress.** Saved state and past answers survive;
-  the specific request that was mid-flight does not.
-- **One process only.** Live updates are held in memory, so running a second copy behind a
-  load balancer needs a shared message layer (Redis or similar) first. The saved event log
-  is fine — only the live push is affected.
+- **Classification errors propagate.** Everything downstream is deterministic, so a message
+  attributed to the wrong company is executed correctly against the wrong company. Short
+  answers state their scope so the error is visible immediately.
+- **A run in progress does not survive a restart.** Persisted state and past answers do.
+- **Single process.** Live event delivery is in-memory, so horizontal scaling requires a
+  shared message layer first. The persisted event log is unaffected.
 - **US-listed stocks only** (§8).
-- **News is headlines and snippets**, not full articles.
-- **Market holidays are not modelled.** On a holiday the system treats the market as open,
-  so price data refreshes a few extra times. Harmless, and no worse than a plain timer.
-- **No portfolio maths** — no correlations, no optimisation, no Sharpe ratios. That is a
-  different project with a different core skill.
+- **News is headlines and snippets**, not article text.
+- **Market holidays are not modelled.** The system treats a holiday as an open market, so
+  price data refreshes a few extra times.
+- **No portfolio mathematics** — no correlations, optimisation or risk ratios.
