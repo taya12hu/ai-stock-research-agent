@@ -151,6 +151,40 @@ def _continue_offer(session_tickers: list[str]) -> str:
     return f"Ask me about a company and I'll pull its {CAPABILITIES.aspects_phrase}."
 
 
+# ─────────────────────────── pleasantries ───────────────────────────
+
+
+def greeting(session_tickers: list[str]) -> str:
+    """"hi" with nothing attached.
+
+    Distinct from `off_domain` on purpose. A greeting is not a request that has to be
+    declined, and answering it with "That's not something I can help with" was both
+    inaccurate and cold: nobody had asked for anything yet. Same job as the decline
+    replies — say what this is, offer the obvious next step — without the refusal frame.
+    """
+    if session_tickers:
+        return (
+            f"Hello. We're on {join_human(session_tickers)} at the moment. Ask me anything "
+            "about them, or name another company."
+        )
+    return (
+        "Hello. I research stocks: name a company and I'll pull its "
+        f"{CAPABILITIES.aspects_phrase}."
+    )
+
+
+def acknowledgement(session_tickers: list[str]) -> str:
+    """"thanks", "ok got it", "interesting" — a reaction, not a question.
+
+    These used to get the off-domain decline, which meant thanking the assistant was
+    answered with "That's not something I can help with". Worth its own reply for the same
+    reason the greeting is: the user asked for nothing, so there is nothing to refuse.
+    """
+    if session_tickers:
+        return f"Glad it helped. Happy to keep going on {join_human(session_tickers)}, or look at another company."
+    return "Glad it helped. Name another company whenever you want to dig into one."
+
+
 # ─────────────────────────── off-domain ───────────────────────────
 
 

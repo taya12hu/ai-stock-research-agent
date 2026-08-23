@@ -56,6 +56,7 @@ def _intent(
     shape_hint: str = "none",
     aspects: list[str] | None = None,
     off_domain_topic: str | None = None,
+    pleasantry: str = "none",
 ) -> TurnIntent:
     return TurnIntent(
         companies=[
@@ -67,6 +68,7 @@ def _intent(
         shape_hint=shape_hint,
         aspects=aspects or [],
         off_domain_topic=off_domain_topic,
+        pleasantry=pleasantry,
     )
 
 
@@ -638,3 +640,63 @@ def test_naming_a_company_without_extending_still_replaces_the_scope() -> None:
 
     assert plan["scope"] == ["NVDA"]
     assert plan["shape"] == "single"
+
+
+# ─────────────────────── pleasantries ───────────────────────
+
+
+def test_a_bare_greeting_is_welcomed_not_declined() -> None:
+    """"hi" used to fall through to the off-domain decline and be answered with "That's
+    not something I can help with" — a refusal to a message that asked for nothing."""
+    plan = plan_turn(
+        intent=_intent(pleasantry="greeting"),
+        resolution=ScopeResolution(),
+        state=_state(),
+        now=NOW,
+    )
+
+    assert plan["kind"] == "chat"
+    assert plan["reply"].startswith("Hello")
+    assert "not something I can help with" not in plan["reply"]
+
+
+def test_a_thank_you_is_acknowledged_not_declined() -> None:
+    plan = plan_turn(
+        intent=_intent(pleasantry="acknowledgement"),
+        resolution=ScopeResolution(),
+        state=_state(researched={"NVDA": _cells()}),
+        now=NOW,
+    )
+
+    assert plan["kind"] == "chat"
+    assert "Glad it helped" in plan["reply"]
+    # The offer names what is actually in the session rather than a generic invitation.
+    assert "NVDA" in plan["reply"]
+
+
+def test_a_greeting_carrying_a_real_request_still_researches() -> None:
+    """The guard that makes a wrong `pleasantry` harmless: "hi, analyse Apple" resolves a
+    company, so the pleasantry branch must not swallow the question."""
+    plan = plan_turn(
+        intent=_intent(companies=[("Apple", "research_subject")], pleasantry="greeting"),
+        resolution=ScopeResolution(subjects=["AAPL"], attempted=True),
+        state=_state(),
+        now=NOW,
+    )
+
+    assert plan["kind"] == "research"
+    assert plan["scope"] == ["AAPL"]
+
+
+def test_a_pleasantry_alongside_an_off_domain_request_is_still_declined() -> None:
+    """"hi, can you write my resignation email" has something to decline, and the decline
+    names the topic — the greeting must not replace it."""
+    plan = plan_turn(
+        intent=_intent(pleasantry="greeting", off_domain_topic="writing a resignation email"),
+        resolution=ScopeResolution(),
+        state=_state(),
+        now=NOW,
+    )
+
+    assert plan["kind"] == "chat"
+    assert "resignation email" in plan["reply"]

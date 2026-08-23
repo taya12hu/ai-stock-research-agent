@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 from app.graph.session import CompanyRole, Shape
 
 ShapeHint = Literal["single", "comparison", "portfolio", "none"]
+Pleasantry = Literal["greeting", "acknowledgement", "none"]
 
 
 class CompanyRef(BaseModel):
@@ -163,6 +164,24 @@ class TurnIntent(BaseModel):
             "genuinely narrowed the question, e.g. 'how are Apple's fundamentals' or "
             "'what's the RSI on NVDA'. An empty list is not a failure to answer; it is the "
             "correct answer most of the time."
+        ),
+    )
+    pleasantry: Pleasantry = Field(
+        default="none",
+        description=(
+            "Set this ONLY when the message is nothing but social courtesy, with no "
+            "question and no request anywhere in it.\n\n"
+            "'greeting' — an opening with nothing attached: 'hi', 'hello', 'hey there', "
+            "'good morning'.\n\n"
+            "'acknowledgement' — a reaction to what was just said, asking for nothing: "
+            "'thanks', 'thank you, that was helpful', 'ok got it', 'interesting', "
+            "'makes sense', 'perfect'.\n\n"
+            "'none' — anything that asks for something, however politely. 'Thanks, now "
+            "what about AMD?' is 'none', because a question follows the thanks. 'Hi, can "
+            "you analyse Apple?' is 'none'. If any part of the message is a request, this "
+            "is 'none'. When in doubt, choose 'none': treating a real question as small "
+            "talk loses the question, which is far worse than answering a greeting "
+            "literally."
         ),
     )
     off_domain_topic: str | None = Field(
