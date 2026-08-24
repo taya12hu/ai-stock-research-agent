@@ -1,0 +1,60 @@
+# Keeps the Render free-tier backend from cold-starting.
+#
+# Render spins a free web service down after ~15 minutes of inactivity, and waking it takes
+# roughly 40 seconds. That is fine for a hobby deploy and bad for a demo link: the frontend
+# loads instantly from Vercel, so a visitor types a question and then waits 40s with no
+# feedback, which reads as broken rather than as a free-tier tradeoff.
+#
+# Pinging /health every 10 minutes keeps the instance up. /health does no model or provider
+# work, so this costs no API quota.
+#
+# Two limits shape the schedule below:
+#
+#   Render gives 750 instance-hours per month across free services. Staying awake 24/7
+#   would burn ~730 of them, leaving no headroom and breaking the moment a second free
+#   service exists. 20 hours a day is ~600, which leaves room to spare.
+#
+#   GitHub's scheduled runs are best-effort. They are frequently late by 5-15 minutes and
+#   can be dropped entirely when the platform is busy, so a 10-minute interval against a
+#   15-minute idle timeout is deliberately tight: a single skipped run should not be enough
+#   to let the service sleep.
+
+name: Keep backend warm
+
+on:
+  schedule:
+    # Every 10 minutes, 02:00-21:59 UTC. That window covers roughly 07:30-03:30 IST and
+    # US Eastern business hours. Change `2-21` to `*` for 24/7, but read the hours note above.
+    - cron: "*/10 2-21 * * *"
+  workflow_dispatch: # lets you wake it manually before sharing the link
+
+# If a run is somehow still going when the next fires, the newer one is what matters.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping /health
+        run: |
+          URL="https://ai-stock-research-backend.onrender.com/health"
+
+          # --max-time 120 because a cold start legitimately takes ~40s and can take longer
+          # under load. A shorter timeout would report failure for a service that is simply
+          # waking up, which is exactly the case this workflow exists to handle.
+          code=$(curl -sS -o /tmp/body.txt -w '%{http_code}' --max-time 120 "$URL") || {
+            echo "::error::curl failed to reach $URL"
+            exit 1
+          }
+
+          echo "HTTP $code"
+          cat /tmp/body.txt
+          echo
+
+          if [ "$code" != "200" ]; then
+            echo "::error::Expected 200 from $URL, got $code"
+            exit 1
+          fi
