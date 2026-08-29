@@ -10,9 +10,12 @@
 #
 # Two limits shape the schedule below:
 #
-#   Render gives 750 instance-hours per month across free services. Staying awake 24/7
-#   would burn ~730 of them, leaving no headroom and breaking the moment a second free
-#   service exists. 20 hours a day is ~600, which leaves room to spare.
+#   Render gives 750 instance-hours per month across ALL free services in the workspace.
+#   There is now a second free service (the dinemind gen-ai backend), which runs an
+#   identical keep-warm workflow. The budget therefore has to be split: ~11 hours a day
+#   each is ~334 h/service, ~668 h total, leaving ~80 h of headroom under 750. Keep both
+#   workflows on the same 12:00-22:59 UTC window so a change to one is an obvious prompt
+#   to change the other.
 #
 #   GitHub's scheduled runs are best-effort. They are frequently late by 5-15 minutes and
 #   can be dropped entirely when the platform is busy, so a 10-minute interval against a
@@ -23,9 +26,10 @@ name: Keep backend warm
 
 on:
   schedule:
-    # Every 10 minutes, 02:00-21:59 UTC. That window covers roughly 07:30-03:30 IST and
-    # US Eastern business hours. Change `2-21` to `*` for 24/7, but read the hours note above.
-    - cron: "*/10 2-21 * * *"
+    # Every 10 minutes, 12:00-22:59 UTC. That window covers roughly 17:30 IST - 04:40 IST
+    # and 08:00-19:00 US Eastern, i.e. Indian evening/night plus the full US workday.
+    # Widening it means eating into the shared 750 h budget - read the hours note above.
+    - cron: "*/10 12-22 * * *"
   workflow_dispatch: # lets you wake it manually before sharing the link
 
 # If a run is somehow still going when the next fires, the newer one is what matters.
