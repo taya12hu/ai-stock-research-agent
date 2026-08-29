@@ -1,0 +1,64 @@
+# Keeps the Render free-tier backend from cold-starting.
+#
+# Render spins a free web service down after ~15 minutes of inactivity, and waking it takes
+# roughly 40 seconds. That is fine for a hobby deploy and bad for a demo link: the frontend
+# loads instantly from Vercel, so a visitor types a question and then waits 40s with no
+# feedback, which reads as broken rather than as a free-tier tradeoff.
+#
+# Pinging /health every 10 minutes keeps the instance up. /health does no model or provider
+# work, so this costs no API quota.
+#
+# Two limits shape the schedule below:
+#
+#   Render gives 750 instance-hours per month across ALL free services in the workspace.
+#   There is now a second free service (the dinemind gen-ai backend), which runs an
+#   identical keep-warm workflow. The budget therefore has to be split: ~11 hours a day
+#   each is ~334 h/service, ~668 h total, leaving ~80 h of headroom under 750. Keep both
+#   workflows on the same 12:00-22:59 UTC window so a change to one is an obvious prompt
+#   to change the other.
+#
+#   GitHub's scheduled runs are best-effort. They are frequently late by 5-15 minutes and
+#   can be dropped entirely when the platform is busy, so a 10-minute interval against a
+#   15-minute idle timeout is deliberately tight: a single skipped run should not be enough
+#   to let the service sleep.
+
+name: Keep backend warm
+
+on:
+  schedule:
+    # Every 10 minutes, 12:00-22:59 UTC. That window covers roughly 17:30 IST - 04:40 IST
+    # and 08:00-19:00 US Eastern, i.e. Indian evening/night plus the full US workday.
+    # Widening it means eating into the shared 750 h budget - read the hours note above.
+    - cron: "*/10 12-22 * * *"
+  workflow_dispatch: # lets you wake it manually before sharing the link
+
+# If a run is somehow still going when the next fires, the newer one is what matters.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping /health
+        run: |
+          URL="https://ai-stock-research-backend.onrender.com/health"
+
+          # --max-time 120 because a cold start legitimately takes ~40s and can take longer
+          # under load. A shorter timeout would report failure for a service that is simply
+          # waking up, which is exactly the case this workflow exists to handle.
+          code=$(curl -sS -o /tmp/body.txt -w '%{http_code}' --max-time 120 "$URL") || {
+            echo "::error::curl failed to reach $URL"
+            exit 1
+          }
+
+          echo "HTTP $code"
+          cat /tmp/body.txt
+          echo
+
+          if [ "$code" != "200" ]; then
+            echo "::error::Expected 200 from $URL, got $code"
+            exit 1
+          fi
